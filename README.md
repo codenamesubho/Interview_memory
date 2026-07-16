@@ -1,0 +1,154 @@
+# Interview Practice MCP Server
+
+A local MCP server that gives Claude persistent memory of your DSA / HLD / LLD / Behavioral interview practice — backed by plain files on your disk that you can open and review anytime.
+
+It knows a built-in catalog of ~230 problems (149 DSA, 30 HLD, 25 LLD, 29 Behavioral), tracks what you've attempted and when, and can recommend what to practice next: new problems, or ones due for revision, biased toward your flagged weak areas.
+
+## What it stores
+
+Session/tracking data, under `~/interview-prep/` by default:
+
+- **`revision.md`** — human-readable chronological log, one section per session. This is the file *you* review.
+- **`index.json`** — compact machine index: sessions, aggregated weak areas, competency scores (Behavioral), and a per-problem tracker (times practiced, last verdict, last attempt date, absolute path to the linked solution/doc). Keeps Claude's context small.
+- **`custom_catalog.json`** — problems you've added yourself (e.g. from a mock interview), merged with the built-in `catalog.json` shipped next to `server.py`.
+
+**Per-problem solutions/docs live in four independent, separately configurable directories** — each defaults to a folder under `~/interview-prep/docs/` but is normally pointed at wherever your real practice work lives:
+
+- **`DSA_SOLUTIONS_DIR`** (e.g. `~/code/DSA_mock`) — organized as `<Topic_Folder>/<problem>.py`, one real Python file per problem grouped by topic, matching a typical personal LeetCode-practice layout. DSA is code, not markdown — see `save_dsa_solution` below.
+- **`HLD_SOLUTIONS_DIR`** (e.g. `~/code/HLD`) — one markdown file per HLD problem (e.g. `design-rate-limiter.md`).
+- **`LLD_SOLUTIONS_DIR`** (e.g. `~/code/LLD`) — one markdown file per LLD problem (e.g. `design-parking-lot.md`).
+- **`BEHAVIORAL_SOLUTIONS_DIR`** (e.g. `~/code/Behavioral`) — holds a single `candidate_context.md`: your reusable background + STAR story bank, with a "Current Focus" section you refresh per company/role. See `save_candidate_context` below.
+
+## Tools exposed to Claude
+
+| Tool | When Claude uses it |
+|---|---|
+| `get_progress_summary` | Start of every session — session table, weak areas, competency scores, catalog coverage per type |
+| `get_catalog` | Browse the full problem pool for DSA/HLD/LLD/Behavioral, filterable by topic/difficulty/status, to find a problem's exact id |
+| `suggest_next_problems` | "What should I practice next?" — ranks due-for-revision and weak-area-matching problems above fresh new ones |
+| `add_custom_problem` | Add a problem not in the built-in catalog (company-specific, from a mock interview, a real behavioral question you were asked, etc.) |
+| `log_session` | End of every session, all types — appends to `revision.md`, updates weak areas and the per-problem tracker; optionally records per-competency scores (1-5) and improvement suggestions |
+| `save_practice_doc` | HLD/LLD only — after a design discussion, writes its own markdown file for quick revision |
+| `get_practice_doc` | Fetch one saved HLD/LLD doc in full, e.g. to revise a specific past solution |
+| `list_practice_docs` | List all saved HLD/LLD docs (title, topic, last updated) as a revision menu |
+| `save_candidate_context` | Behavioral only — persist your reusable candidate profile + STAR story bank as one markdown file, overwriting the previous version |
+| `get_candidate_context` | Fetch the saved candidate context in full, e.g. at the start of a behavioral mock session |
+| `scan_dsa_directory` | Read `DSA_SOLUTIONS_DIR` — folder/filename/problem-statement-snippet/last-modified for every `.py` file, flagging which are already tracked |
+| `import_solved_dsa_problem(s)` | Backfill the tracker from an existing file on disk (matched to a catalog id) *without* touching the file — uses its mtime as "last practiced" |
+| `save_dsa_solution` | After solving a NEW DSA problem — writes a `.py` file into the right topic folder in `DSA_SOLUTIONS_DIR`; refuses to overwrite an existing file unless told to |
+| `get_session_detail` | Revisit the full log entry for one past session |
+| `resolve_weak_area` | Remove a weak area once you've demonstrably improved at it |
+
+## Setup (macOS)
+
+1. Keep this folder wherever you cloned it, e.g. `/Users/YOUR_USERNAME/code/file_mcp/`. `server.py` and `catalog.json` must stay next to each other — the catalog is loaded relative to the script.
+
+2. Install the MCP SDK (any Python ≥3.10):
+
+   ```bash
+   pip3 install mcp
+   ```
+
+   (If you use `uv`: `uv pip install mcp`, and adjust the command below to your venv's python.)
+
+3. Open Claude Desktop → **Settings → Developer → Edit Config**. This opens `~/Library/Application Support/Claude/claude_desktop_config.json`. Add:
+
+   ```json
+   {
+     "mcpServers": {
+       "interview-memory": {
+         "command": "python3",
+         "args": ["/Users/YOUR_USERNAME/code/file_mcp/server.py"],
+         "env": {
+           "INTERVIEW_PREP_DIR": "/Users/YOUR_USERNAME/interview-prep",
+           "DSA_SOLUTIONS_DIR": "/Users/YOUR_USERNAME/code/DSA_mock",
+           "HLD_SOLUTIONS_DIR": "/Users/YOUR_USERNAME/code/HLD",
+           "LLD_SOLUTIONS_DIR": "/Users/YOUR_USERNAME/code/LLD",
+           "BEHAVIORAL_SOLUTIONS_DIR": "/Users/YOUR_USERNAME/code/Behavioral"
+         }
+       }
+     }
+   }
+   ```
+
+   Use absolute paths. If `python3` on your PATH isn't the one with `mcp` installed, use the full path (check with `which python3`). Omit any of the four `*_SOLUTIONS_DIR` vars you don't need — each independently falls back to a folder under `INTERVIEW_PREP_DIR`.
+
+4. Fully quit Claude Desktop (Cmd+Q) and reopen it. You should see the server's tools under the connectors/tools indicator in the chat input.
+
+**Note:** `~/code/HLD` and `~/code/LLD` were created fresh and are empty — this server only ever writes into them going forward, there's nothing to import. If you have older LLD work elsewhere (e.g. `~/code/Practice LLD/chess/main.py`), that's a different one-file-per-subfolder convention than what `save_practice_doc` writes here; migrate it in manually if you want it tracked, or leave it as-is and treat `~/code/LLD` as the fresh start.
+
+## First-time DSA import
+
+If `DSA_SOLUTIONS_DIR` already has solutions in it (like an existing `Arrays_and_Hashing/`, `Graphs/`, etc. layout), the tracker starts out blank until you import — the files existing on disk isn't the same as the MCP knowing about them. Ask Claude:
+
+> Scan my DSA directory and import everything you can confidently match to the catalog.
+
+Claude will call `scan_dsa_directory()`, read each file's problem-statement snippet, match filenames like `island.py` → `number-of-islands` or `top_k.py` → `top-k-frequent-elements` using its own judgment (filenames rarely match catalog ids exactly), and call `import_solved_dsa_problems` in bulk. Anything it can't confidently match (scratch files, company-specific problems) it should flag for you to decide — add those via `add_custom_problem` first if you want them tracked. This step only reads files and writes to `index.json`; it never modifies anything under `DSA_SOLUTIONS_DIR`.
+
+## Wiring it into your practice routine
+
+Say this at the start of a chat (or bake it into a Claude Desktop project/skill):
+
+> At the start of every practice session, call `get_progress_summary`, then `suggest_next_problems` for the type we're practicing (DSA/HLD/LLD) and let me pick from the top few. After we solve/discuss it, call `log_session` (with `problem_id` set). Then for HLD/LLD call `save_practice_doc` with the full write-up (HLD: requirements, capacity estimate, architecture, API/data model, trade-offs; LLD: class design, patterns used, key decisions). For DSA, if the problem isn't already on disk, call `save_dsa_solution` with the final code and a short explanation.
+
+Example flow (HLD):
+
+1. **"What should I practice today?"** → Claude calls `get_progress_summary`, then `suggest_next_problems("HLD")`, and proposes 2-3 options (mixing anything due for revision with new ones matching your weak areas).
+2. You work through the problem together.
+3. Claude calls `log_session(..., problem_id="design-rate-limiter")` to record the verdict/gaps, then `save_practice_doc("HLD", "Design a Rate Limiter", <full writeup>, problem_id="design-rate-limiter")`, creating `HLD_SOLUTIONS_DIR/design-rate-limiter.md`.
+4. Next time you ask to revise, `list_practice_docs()` shows everything documented so far, and `get_practice_doc` pulls up any specific one in full.
+
+Example flow (DSA):
+
+1. `suggest_next_problems("DSA")` → you pick "Course Schedule".
+2. You solve it together.
+3. `log_session(..., problem_id="course-schedule")`, then `save_dsa_solution("course-schedule", "Course Schedule", "Graphs", <code>, explanation="topological sort via Kahn's algorithm")` → creates `DSA_SOLUTIONS_DIR/Graphs/course_schedule.py`.
+
+Example flow (Behavioral):
+
+1. Before your first mock session, tell Claude about your background and stories; it calls `save_candidate_context(...)` to write `BEHAVIORAL_SOLUTIONS_DIR/candidate_context.md` (a "Core Profile & Story Bank" section, plus a "Current Focus" section for whichever company/role you're currently prepping for).
+2. **"Let's do a behavioral mock for CompanyX."** → Claude calls `get_candidate_context()` to see your stories, then `suggest_next_problems("Behavioral")` and proposes a few questions (built-in catalog of 29 common questions across competencies like Leadership, Conflict & Disagreement, Ownership — see `catalog.json`), or you can just ask about a real question you were asked and it'll use `add_custom_problem("Behavioral", ...)` to track it.
+3. You answer with a STAR story together.
+4. Claude calls `log_session(..., interview_type="Behavioral", problem_id=..., competency_scores={"leadership": 4, "communication": 3}, improvements="Add a concrete metric to the result step.")` — this appends the verdict, scores, and improvement suggestions to `revision.md`, and updates the per-competency score averages shown in `get_progress_summary`.
+5. Prepping for a different company next week? Call `save_candidate_context(...)` again with an updated "Current Focus" section — the Core Profile & Story Bank stays intact since you write the whole file each time.
+
+## Tuning revision timing
+
+By default a problem is considered "due for revision" 21 days after its last attempt (or immediately, regardless of days, if it matches a currently flagged weak area). Change it via the `INTERVIEW_PREP_STALE_DAYS` env var in the Claude Desktop config's `env` block.
+
+## Adding more problems
+
+`catalog.json` (next to `server.py`) is the shared, built-in catalog — feel free to hand-edit it, or just ask Claude to call `add_custom_problem`, which writes to `custom_catalog.json` inside your `INTERVIEW_PREP_DIR` instead (keeps your personal additions separate from the shipped list).
+
+## Testing / autostart
+
+A stdio-transport MCP server (what this is) isn't a background daemon you start once and leave running — Claude Desktop spawns it fresh as a subprocess every time it needs it, using whatever `command`/`args`/`env` is in `mcpServers.interview-memory` in `claude_desktop_config.json`. So there's no separate "autostart" toggle: **being registered in that config *is* autostart** — Desktop manages the process lifecycle automatically from then on. That's already wired up (see Setup above); you just need to fully quit (Cmd+Q, not just close the window) and reopen Claude Desktop for it to pick up the config.
+
+Three ways to check it's actually working, in increasing order of realism:
+
+1. **Does it even boot?** `python3 server.py` from this folder — should start and hang silently (that's correct; it's waiting for a client on stdin). Ctrl+C to stop.
+2. **Does it speak MCP correctly?** `python3 test_server.py` — spawns the server as a real MCP client would, does the protocol handshake, lists all 16 tools, and calls `get_progress_summary` for real. Read-only, safe to run anytime. A clean "All checks passed" means the server itself is solid, independent of Claude Desktop.
+3. **Is Claude Desktop actually using it?**
+   - Open a chat and look at the tools/connectors icon near the input box — `interview-memory` should be listed with its tool count.
+   - `ps aux | grep server.py` — while Desktop is open, you should see a live `python3 .../server.py` process (Desktop spawns it once you open a chat that uses it, or at startup depending on version).
+   - Logs: `~/Library/Logs/Claude/mcp-server-interview-memory.log`.
+   - Interactive debugging (optional): `mcp dev server.py` launches the MCP Inspector, a local web UI where you can call any tool by hand and see raw responses — useful for poking at edge cases outside a real chat.
+
+## Security
+
+This server only ever runs over **stdio** (`mcp.run(transport="stdio")`), the same as the original. Stdio means Claude Desktop spawns it as a local subprocess and talks to it over stdin/stdout pipes — it opens no network port, so there is nothing for another machine, process, or website to connect to. Don't change the transport to `sse`/`http` unless you also add authentication and bind to `localhost`; as shipped, "outside access" isn't a meaningful attack surface because there's no listener at all.
+
+Within the local filesystem, a few guardrails are worth knowing about since Claude drives these tools somewhat autonomously:
+
+- **Path sanitization.** Every value used to build a filename (`problem_id`, problem titles) is passed through a slugifier that strips everything except `a-z 0-9 -` before it ever touches a path. A value like `../../etc/passwd` becomes `etc-passwd`, not a traversal — verified with an adversarial test during development.
+- **Directory containment.** `save_practice_doc` can only write inside `HLD_SOLUTIONS_DIR` or `LLD_SOLUTIONS_DIR` (whichever matches the call); `save_dsa_solution` can only write inside `DSA_SOLUTIONS_DIR`; `save_candidate_context`/`get_candidate_context` are confined to `BEHAVIORAL_SOLUTIONS_DIR`; `import_solved_dsa_problem(s)` can only *link* to files that already live inside `DSA_SOLUTIONS_DIR` (it refuses anything outside it, e.g. `~/.ssh/`, `/etc/`); `get_practice_doc` re-checks that whatever `index.json` points at is still inside the allowed directory for that problem type before reading it.
+- **No code execution.** The server only reads and writes text files. It never `exec`s, `eval`s, or runs the DSA solutions it stores — `code`/`content_markdown` arguments are treated purely as bytes to persist.
+- **Overwrite protection.** `save_dsa_solution` refuses to replace an existing file unless `overwrite=True` is passed explicitly, since `DSA_SOLUTIONS_DIR` is assumed to hold real, hand-written work. (`save_practice_doc` for HLD/LLD, and `save_candidate_context` for Behavioral, do overwrite by design — they hold Claude's latest write-up/profile, and those directories are managed entirely by this server.)
+- **Env-var-scoped roots.** `INTERVIEW_PREP_DIR`, `DSA_SOLUTIONS_DIR`, `HLD_SOLUTIONS_DIR`, `LLD_SOLUTIONS_DIR`, and `BEHAVIORAL_SOLUTIONS_DIR` are only ever set by you, in your own Claude Desktop config — they aren't something a chat message can override.
+
+## Troubleshooting
+
+- Server not appearing: check JSON syntax in the Claude Desktop config (one bad comma disables everything), confirm paths are absolute, then look at logs in `~/Library/Logs/Claude/mcp-server-interview-memory.log`.
+- Test the server manually: `python3 server.py` should start and wait silently (Ctrl+C to exit).
+- `ModuleNotFoundError: No module named 'mcp'`: run `pip3 install mcp` with the same `python3` referenced in the config.
+- `save_dsa_solution` refusing to write: it never overwrites an existing file without `overwrite=True` — this is deliberate, since `DSA_SOLUTIONS_DIR` is treated as containing real, hand-written solutions.
