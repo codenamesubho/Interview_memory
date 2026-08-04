@@ -21,6 +21,10 @@ EXPECTED_TOOLS = {
     "save_practice_doc", "get_practice_doc", "list_practice_docs",
     "scan_dsa_directory", "import_solved_dsa_problem", "import_solved_dsa_problems",
     "save_dsa_solution", "save_candidate_context", "get_candidate_context",
+    "scan_lld_directory", "read_lld_solution", "import_solved_lld_problem",
+    "import_solved_lld_problems", "save_lld_solution",
+    "start_mock_attempt", "list_mock_attempts", "save_mock_evaluation",
+    "save_ideal_solution", "get_lld_feedback",
 }
 
 

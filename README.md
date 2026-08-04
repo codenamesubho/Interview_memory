@@ -16,7 +16,7 @@ Session/tracking data, under `~/interview-prep/` by default:
 
 - **`DSA_SOLUTIONS_DIR`** (e.g. `~/code/DSA_mock`) — organized as `<Topic_Folder>/<problem>.py`, one real Python file per problem grouped by topic, matching a typical personal LeetCode-practice layout. DSA is code, not markdown — see `save_dsa_solution` below.
 - **`HLD_SOLUTIONS_DIR`** (e.g. `~/code/HLD`) — one markdown file per HLD problem (e.g. `design-rate-limiter.md`).
-- **`LLD_SOLUTIONS_DIR`** (e.g. `~/code/LLD`) — one markdown file per LLD problem (e.g. `design-parking-lot.md`).
+- **`LLD_SOLUTIONS_DIR`** (e.g. `~/code/LLD`) — holds two separate things: the **reference corpus** of your own designs, one self-contained `.py` per problem grouped into category folders (`1_state_machine/vending_machine.py`), plus flat `design-parking-lot.md` write-ups from `save_practice_doc`; and **`Mock Solutions/`**, the mock-interview loop where you attempt a problem and Claude grades it. See [LLD mock interviews](#lld-mock-interviews) below.
 - **`BEHAVIORAL_SOLUTIONS_DIR`** (e.g. `~/code/Behavioral`) — holds a single `candidate_context.md`: your reusable background + STAR story bank, with a "Current Focus" section you refresh per company/role. See `save_candidate_context` below.
 
 ## Tools exposed to Claude
@@ -36,6 +36,15 @@ Session/tracking data, under `~/interview-prep/` by default:
 | `scan_dsa_directory` | Read `DSA_SOLUTIONS_DIR` — folder/filename/problem-statement-snippet/last-modified for every `.py` file, flagging which are already tracked |
 | `import_solved_dsa_problem(s)` | Backfill the tracker from an existing file on disk (matched to a catalog id) *without* touching the file — uses its mtime as "last practiced" |
 | `save_dsa_solution` | After solving a NEW DSA problem — writes a `.py` file into the right topic folder in `DSA_SOLUTIONS_DIR`; refuses to overwrite an existing file unless told to |
+| `scan_lld_directory` | Read `LLD_SOLUTIONS_DIR` — folder/filename/**kind**/snippet/last-modified for every file in the reference corpus, flagging which are already tracked. Only `kind=solution` rows are per-problem designs; `Mock Solutions/` is excluded |
+| `read_lld_solution` | Open ONE LLD file in full — a past design, a corpus doc, or a mock attempt you're about to grade |
+| `import_solved_lld_problem(s)` | Backfill the tracker from an LLD design already on disk, *without* touching the file. Refuses anything that isn't `kind=solution` |
+| `save_lld_solution` | Write a NEW design into the reference corpus, in the right category folder; refuses to overwrite unless told to |
+| `start_mock_attempt` | Pose an LLD problem — creates `Mock Solutions/<id>/` with `problem.md` and an `attempt.py` stub for *you* to fill in. Never overwrites an existing attempt; re-posing opens the next round |
+| `list_mock_attempts` | Every mock problem and round: which files exist, what's still awaiting grading, scores and verdicts |
+| `save_mock_evaluation` | Grade an attempt against the fixed 7-dimension rubric — writes `evaluation.md`, logs the session, and regenerates `feedback.md` |
+| `save_ideal_solution` | Write the interviewer's reference design as `ideal.py`, beside your attempt. Can only ever write `ideal*.py`, so it cannot touch your own file |
+| `get_lld_feedback` | Rubric averages, weakest dimensions, and attempt history — call this *before* `suggest_next_problems("LLD")` to aim the next question |
 | `get_session_detail` | Revisit the full log entry for one past session |
 | `resolve_weak_area` | Remove a weak area once you've demonstrably improved at it |
 
@@ -75,7 +84,7 @@ Session/tracking data, under `~/interview-prep/` by default:
 
 4. Fully quit Claude Desktop (Cmd+Q) and reopen it. You should see the server's tools under the connectors/tools indicator in the chat input.
 
-**Note:** `~/code/HLD` and `~/code/LLD` were created fresh and are empty — this server only ever writes into them going forward, there's nothing to import. If you have older LLD work elsewhere (e.g. `~/code/Practice LLD/chess/main.py`), that's a different one-file-per-subfolder convention than what `save_practice_doc` writes here; migrate it in manually if you want it tracked, or leave it as-is and treat `~/code/LLD` as the fresh start.
+**Note:** `~/code/HLD` only ever receives what this server writes, so there's nothing to import there. `~/code/LLD` is different — it already holds a real corpus of hand-written `.py` designs in category folders, so start with the [first-time LLD import](#first-time-lld-import) below. Older LLD work outside `LLD_SOLUTIONS_DIR` (e.g. `~/code/Practice LLD/chess/main.py`) is not reachable by these tools; move it under `~/code/LLD` if you want it tracked.
 
 ## First-time DSA import
 
@@ -85,11 +94,62 @@ If `DSA_SOLUTIONS_DIR` already has solutions in it (like an existing `Arrays_and
 
 Claude will call `scan_dsa_directory()`, read each file's problem-statement snippet, match filenames like `island.py` → `number-of-islands` or `top_k.py` → `top-k-frequent-elements` using its own judgment (filenames rarely match catalog ids exactly), and call `import_solved_dsa_problems` in bulk. Anything it can't confidently match (scratch files, company-specific problems) it should flag for you to decide — add those via `add_custom_problem` first if you want them tracked. This step only reads files and writes to `index.json`; it never modifies anything under `DSA_SOLUTIONS_DIR`.
 
+## First-time LLD import
+
+`LLD_SOLUTIONS_DIR` (`~/code/LLD`) already holds ~31 hand-written designs in numbered category folders, none of which the tracker knows about. Ask Claude:
+
+> Scan my LLD directory and import everything you can confidently match to the catalog.
+
+`scan_lld_directory()` returns every file with a **Kind** column — `solution` (a per-problem design), `category-doc` (a folder README), `aggregate-doc` (`INDEX.md`, `QUICK_REFERENCE.md` and friends, which span many problems), or `other`. Only `solution` rows are importable; `import_solved_lld_problem(s)` refuses the rest, so an index file can never get linked to a single problem. Claude matches filenames to catalog ids by judgment (`8_lru_cache.py` → `design-lru-cache-oop`), and roughly half the corpus isn't in the 25-entry built-in LLD catalog at all (`order_lifecycle.py`, `whatsapp_messaging.py`, `audit_trail.py`, …) — those need `add_custom_problem` first. Nothing under `~/code/LLD` is modified; only `index.json` is written.
+
+## LLD mock interviews
+
+The loop that turns practice into targeted practice. You write the design yourself; Claude grades it as the interviewer and remembers where you're weak.
+
+```
+~/code/LLD/Mock Solutions/
+  feedback.md                    # running scorecard, regenerated after each grading
+  design-parking-lot/
+    problem.md                   # the prompt, as Claude posed it
+    attempt.py                   # YOUR work — no tool in this server ever writes over it
+    evaluation.md                # Claude's scored critique
+    ideal.py                     # Claude's reference design
+```
+
+Re-attempting a problem later opens the next round (`attempt_2.py`, `evaluation_2.md`, `ideal_2.py`), so you keep the earlier one to diff against.
+
+**The flow.** Say:
+
+> Let's do an LLD mock interview.
+
+1. Claude calls `get_lld_feedback()` and `suggest_next_problems("LLD")` to pick a problem aimed at your weakest dimensions, then `start_mock_attempt(...)` — which writes the prompt and an empty `attempt.py`.
+2. You write your design in `attempt.py`, on your own. Say when you're done.
+3. Claude calls `read_lld_solution("Mock Solutions/design-parking-lot/attempt.py")`, then `save_mock_evaluation(...)` with rubric scores and a written critique, then `save_ideal_solution(...)`.
+4. Read `evaluation.md` and diff `attempt.py` against `ideal.py`.
+
+**The rubric** is a fixed seven-dimension vocabulary, scored 1-5. It's fixed on purpose: free-form labels would never aggregate, and the aggregate is exactly what makes later sessions pick different problems.
+
+| Dimension | What it measures |
+|---|---|
+| `requirements-and-scope` | Clarifying questions, scoping, stated assumptions |
+| `class-decomposition` | Entity/responsibility split, cohesion |
+| `design-patterns` | Pattern choice, and whether it was justified |
+| `solid-and-extensibility` | SOLID, open/closed, how the design absorbs change |
+| `concurrency-and-edge-cases` | Thread safety, races, boundary conditions |
+| `code-quality` | Naming, structure, idiomatic Python |
+| `tradeoff-communication` | Articulating and defending alternatives |
+
+Scores accumulate in `index.json` under `lld:`-prefixed keys (kept apart from Behavioral competency scores, which share that store), and surface in three places: `feedback.md` for you to read, `get_lld_feedback()` and `get_progress_summary()` for Claude, and a weakest-dimensions note appended to `suggest_next_problems("LLD")`. That last one matters — the generic weak-area ranking matches against catalog *topics*, and every LLD topic starts with "OOP Design", so without the rubric the feedback would never actually change what gets asked.
+
+**Safety.** `attempt.py` is yours: `start_mock_attempt` refuses to overwrite one, and `save_ideal_solution` can only ever write a file named `ideal*.py`. Scans and imports exclude `Mock Solutions/` entirely, so Claude's own output can never be backfilled into the tracker as your finished work.
+
 ## Wiring it into your practice routine
 
 Say this at the start of a chat (or bake it into a Claude Desktop project/skill):
 
-> At the start of every practice session, call `get_progress_summary`, then `suggest_next_problems` for the type we're practicing (DSA/HLD/LLD) and let me pick from the top few. After we solve/discuss it, call `log_session` (with `problem_id` set). Then for HLD/LLD call `save_practice_doc` with the full write-up (HLD: requirements, capacity estimate, architecture, API/data model, trade-offs; LLD: class design, patterns used, key decisions). For DSA, if the problem isn't already on disk, call `save_dsa_solution` with the final code and a short explanation.
+> At the start of every practice session, call `get_progress_summary`, then `suggest_next_problems` for the type we're practicing (DSA/HLD/LLD) and let me pick from the top few. For LLD also call `get_lld_feedback` first and aim the pick at my weakest rubric dimensions. After we solve/discuss it, call `log_session` (with `problem_id` set). Then for HLD/LLD call `save_practice_doc` with the full write-up (HLD: requirements, capacity estimate, architecture, API/data model, trade-offs; LLD: class design, patterns used, key decisions). For DSA, if the problem isn't already on disk, call `save_dsa_solution` with the final code and a short explanation.
+>
+> If I say I want to *attempt* an LLD problem myself rather than discuss it, run the mock loop instead: `start_mock_attempt`, wait for me to write `attempt.py`, then `read_lld_solution`, `save_mock_evaluation` (score honestly — inflated scores break the feedback loop), and `save_ideal_solution`.
 
 Example flow (HLD):
 
