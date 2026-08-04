@@ -100,7 +100,7 @@ Claude will call `scan_dsa_directory()`, read each file's problem-statement snip
 
 > Scan my LLD directory and import everything you can confidently match to the catalog.
 
-`scan_lld_directory()` returns every file with a **Kind** column — `solution` (a per-problem design), `category-doc` (a folder README), `aggregate-doc` (`INDEX.md`, `QUICK_REFERENCE.md` and friends, which span many problems), or `other`. Only `solution` rows are importable; `import_solved_lld_problem(s)` refuses the rest, so an index file can never get linked to a single problem. Claude matches filenames to catalog ids by judgment (`8_lru_cache.py` → `design-lru-cache-oop`), and roughly half the corpus isn't in the 25-entry built-in LLD catalog at all (`order_lifecycle.py`, `whatsapp_messaging.py`, `audit_trail.py`, …) — those need `add_custom_problem` first. Nothing under `~/code/LLD` is modified; only `index.json` is written.
+`scan_lld_directory()` returns every file with a **Kind** column — `solution` (a per-problem design), `category-doc` (a folder README), `aggregate-doc` (`INDEX.md`, `QUICK_REFERENCE.md` and friends, which span many problems), `practice-doc` (a markdown write-up this server wrote via `save_practice_doc`), or `other`. Only `solution` rows are importable; `import_solved_lld_problem(s)` refuses the rest, so an index file can never get linked to a single problem. Claude matches filenames to catalog ids by judgment (`8_lru_cache.py` → `design-lru-cache-oop`), and roughly half the corpus isn't in the 25-entry built-in LLD catalog at all (`order_lifecycle.py`, `whatsapp_messaging.py`, `audit_trail.py`, …) — those need `add_custom_problem` first. Nothing under `~/code/LLD` is modified; only `index.json` is written.
 
 ## LLD mock interviews
 
@@ -184,11 +184,12 @@ By default a problem is considered "due for revision" 21 days after its last att
 
 A stdio-transport MCP server (what this is) isn't a background daemon you start once and leave running — Claude Desktop spawns it fresh as a subprocess every time it needs it, using whatever `command`/`args`/`env` is in `mcpServers.interview-memory` in `claude_desktop_config.json`. So there's no separate "autostart" toggle: **being registered in that config *is* autostart** — Desktop manages the process lifecycle automatically from then on. That's already wired up (see Setup above); you just need to fully quit (Cmd+Q, not just close the window) and reopen Claude Desktop for it to pick up the config.
 
-Three ways to check it's actually working, in increasing order of realism:
+Four ways to check it's actually working, in increasing order of realism:
 
 1. **Does it even boot?** `python3 server.py` from this folder — should start and hang silently (that's correct; it's waiting for a client on stdin). Ctrl+C to stop.
-2. **Does it speak MCP correctly?** `python3 test_server.py` — spawns the server as a real MCP client would, does the protocol handshake, lists all 16 tools, and calls `get_progress_summary` for real. Read-only, safe to run anytime. A clean "All checks passed" means the server itself is solid, independent of Claude Desktop.
-3. **Is Claude Desktop actually using it?**
+2. **Does it speak MCP correctly?** `python3 test_server.py` — spawns the server as a real MCP client would, does the protocol handshake, lists all 26 tools, and calls `get_progress_summary` for real. Read-only, safe to run anytime. A clean "All checks passed" means the server itself is solid, independent of Claude Desktop.
+3. **Do the LLD tools actually behave?** `python3 test_lld_tools.py` — builds a synthetic design repo in a temp directory and exercises every LLD tool against it: path guards, kind classification, rubric validation, the full mock loop, and above all that `attempt.py` comes out byte-identical to what was written. Hermetic — it never touches `~/code/LLD` or your real `index.json`.
+4. **Is Claude Desktop actually using it?**
    - Open a chat and look at the tools/connectors icon near the input box — `interview-memory` should be listed with its tool count.
    - `ps aux | grep server.py` — while Desktop is open, you should see a live `python3 .../server.py` process (Desktop spawns it once you open a chat that uses it, or at startup depending on version).
    - Logs: `~/Library/Logs/Claude/mcp-server-interview-memory.log`.

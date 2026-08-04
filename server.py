@@ -426,6 +426,18 @@ def _is_mock_path(path: Path) -> bool:
         return False
 
 
+def _has_practice_doc_header(path: Path) -> bool:
+    """True if this markdown file was written by save_practice_doc, which
+    stamps "_Last updated: <date> · Type: <type> · id: `<slug>`_" under the
+    title. Only the head of the file is read."""
+    try:
+        with path.open(encoding="utf-8", errors="ignore") as f:
+            head = f.read(400)
+    except OSError:
+        return False
+    return "· Type: " in head and "· id: " in head
+
+
 def _lld_kind(path: Path) -> str:
     """Classify one file under LLD_SOLUTIONS_DIR so callers can tell the user's
     own designs apart from aggregate docs and from Claude's generated output.
@@ -444,10 +456,16 @@ def _lld_kind(path: Path) -> str:
         return "mock-other"
 
     if path.suffix.lower() != ".py":
-        # A .md inside a category folder documents that category; one at the
-        # top level (INDEX.md, QUICK_REFERENCE.md) spans the whole corpus.
         if path.suffix.lower() in {".md", ".txt"}:
-            return "category-doc" if path.parent != LLD_SOLUTIONS_DIR else "aggregate-doc"
+            # A .md inside a category folder documents that category.
+            if path.parent != LLD_SOLUTIONS_DIR:
+                return "category-doc"
+            # At the top level, save_practice_doc's own per-problem write-ups
+            # sit alongside corpus-wide indexes (INDEX.md, QUICK_REFERENCE.md).
+            # Tell them apart by the header that tool stamps on every file it
+            # writes, so a write-up about one problem isn't reported as
+            # spanning many.
+            return "practice-doc" if _has_practice_doc_header(path) else "aggregate-doc"
         return "other"
 
     # A .py directly at the top level isn't part of the by-category convention.
@@ -1369,9 +1387,11 @@ def scan_lld_directory(category_folder: str = "") -> str:
 
     The Kind column matters — only rows with kind=solution are the user's
     per-problem designs. category-doc / aggregate-doc rows are READMEs and
-    index files spanning many problems; don't import those as solutions.
-    Files under "Mock Solutions/" are deliberately excluded here: use
-    list_mock_attempts for the mock-interview loop.
+    index files spanning many problems; practice-doc rows are markdown
+    write-ups this server wrote via save_practice_doc (fetch those with
+    get_practice_doc). Don't import anything but solutions. Files under
+    "Mock Solutions/" are deliberately excluded here: use list_mock_attempts
+    for the mock-interview loop.
 
     Read the snippets, match each not-yet-imported solution to a catalog id
     yourself (browse with get_catalog; add_custom_problem first for anything
@@ -1707,6 +1727,10 @@ def save_mock_evaluation(
     against what an interviewer would expect at the target level — inflated
     scores make the whole feedback loop useless, since these averages are what
     later sessions use to pick problems.
+
+    Grade each round once. Re-grading the same round appends a second set of
+    scores rather than replacing the first, so the averages would count that
+    attempt twice.
 
     rubric_scores keys MUST come from this fixed list (1-5 each; omit a
     dimension the problem didn't exercise):
