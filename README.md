@@ -44,6 +44,7 @@ Session/tracking data, under `~/interview-prep/` by default:
 | `list_mock_attempts` | Every mock problem and round: which files exist, what's still awaiting grading, scores and verdicts |
 | `save_mock_evaluation` | Grade an attempt against the fixed 7-dimension rubric — writes `evaluation.md`, logs the session, and regenerates `feedback.md` |
 | `save_ideal_solution` | Write the interviewer's reference design as `ideal.py`, beside your attempt. Can only ever write `ideal*.py`, so it cannot touch your own file |
+| `save_simple_solution` | Write a pared-back version of that design as `simple.py` — what a strong candidate could realistically finish in the time box. Can only ever write `simple*.py` |
 | `get_lld_feedback` | Rubric averages, weakest dimensions, and attempt history — call this *before* `suggest_next_problems("LLD")` to aim the next question |
 | `get_session_detail` | Revisit the full log entry for one past session |
 | `resolve_weak_area` | Remove a weak area once you've demonstrably improved at it |
@@ -114,9 +115,10 @@ The loop that turns practice into targeted practice. You write the design yourse
     attempt.py                   # YOUR work — no tool in this server ever writes over it
     evaluation.md                # Claude's scored critique
     ideal.py                     # Claude's reference design
+    simple.py                    # the same design pared back to interview scope
 ```
 
-Re-attempting a problem later opens the next round (`attempt_2.py`, `evaluation_2.md`, `ideal_2.py`), so you keep the earlier one to diff against.
+Re-attempting a problem later opens the next round (`attempt_2.py`, `evaluation_2.md`, `ideal_2.py`, `simple_2.py`), so you keep the earlier one to diff against.
 
 **The flow.** Say:
 
@@ -124,8 +126,8 @@ Re-attempting a problem later opens the next round (`attempt_2.py`, `evaluation_
 
 1. Claude calls `get_lld_feedback()` and `suggest_next_problems("LLD")` to pick a problem aimed at your weakest dimensions, then `start_mock_attempt(...)` — which writes the prompt and an empty `attempt.py`.
 2. You write your design in `attempt.py`, on your own. Say when you're done.
-3. Claude calls `read_lld_solution("Mock Solutions/design-parking-lot/attempt.py")`, then `save_mock_evaluation(...)` with rubric scores and a written critique, then `save_ideal_solution(...)`.
-4. Read `evaluation.md` and diff `attempt.py` against `ideal.py`.
+3. Claude calls `read_lld_solution("Mock Solutions/design-parking-lot/attempt.py")`, then `save_mock_evaluation(...)` with rubric scores and a written critique, then `save_ideal_solution(...)` and optionally `save_simple_solution(...)`.
+4. Read `evaluation.md` and diff `attempt.py` against `ideal.py` — and against `simple.py` for the version that actually fits the clock.
 
 **The rubric** is a fixed seven-dimension vocabulary, scored 1-5. It's fixed on purpose: free-form labels would never aggregate, and the aggregate is exactly what makes later sessions pick different problems.
 
@@ -141,7 +143,7 @@ Re-attempting a problem later opens the next round (`attempt_2.py`, `evaluation_
 
 Scores accumulate in `index.json` under `lld:`-prefixed keys (kept apart from Behavioral competency scores, which share that store), and surface in three places: `feedback.md` for you to read, `get_lld_feedback()` and `get_progress_summary()` for Claude, and a weakest-dimensions note appended to `suggest_next_problems("LLD")`. That last one matters — the generic weak-area ranking matches against catalog *topics*, and every LLD topic starts with "OOP Design", so without the rubric the feedback would never actually change what gets asked.
 
-**Safety.** `attempt.py` is yours: `start_mock_attempt` refuses to overwrite one, and `save_ideal_solution` can only ever write a file named `ideal*.py`. Scans and imports exclude `Mock Solutions/` entirely, so Claude's own output can never be backfilled into the tracker as your finished work.
+**Safety.** `attempt.py` is yours: `start_mock_attempt` refuses to overwrite one, `save_ideal_solution` can only ever write a file named `ideal*.py`, and `save_simple_solution` only `simple*.py`. Scans and imports exclude `Mock Solutions/` entirely, so Claude's own output can never be backfilled into the tracker as your finished work.
 
 ## Wiring it into your practice routine
 
@@ -149,7 +151,7 @@ Say this at the start of a chat (or bake it into a Claude Desktop project/skill)
 
 > At the start of every practice session, call `get_progress_summary`, then `suggest_next_problems` for the type we're practicing (DSA/HLD/LLD) and let me pick from the top few. For LLD also call `get_lld_feedback` first and aim the pick at my weakest rubric dimensions. After we solve/discuss it, call `log_session` (with `problem_id` set). Then for HLD/LLD call `save_practice_doc` with the full write-up (HLD: requirements, capacity estimate, architecture, API/data model, trade-offs; LLD: class design, patterns used, key decisions). For DSA, if the problem isn't already on disk, call `save_dsa_solution` with the final code and a short explanation.
 >
-> If I say I want to *attempt* an LLD problem myself rather than discuss it, run the mock loop instead: `start_mock_attempt`, wait for me to write `attempt.py`, then `read_lld_solution`, `save_mock_evaluation` (score honestly — inflated scores break the feedback loop), and `save_ideal_solution`.
+> If I say I want to *attempt* an LLD problem myself rather than discuss it, run the mock loop instead: `start_mock_attempt`, wait for me to write `attempt.py`, then `read_lld_solution`, `save_mock_evaluation` (score honestly — inflated scores break the feedback loop), `save_ideal_solution`, and `save_simple_solution` for the cut-down version.
 
 Example flow (HLD):
 
