@@ -35,6 +35,24 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def mock_row(listing: str, slug: str, round_no: int) -> dict:
+    """One data row of list_mock_attempts, as {column header: cell}. Asserting
+    against parsed cells (rather than a substring of the whole table) is what
+    makes a per-role column check meaningful -- a bare `"Simple" in listing`
+    would match the header alone and pass even if the column were never wired
+    into the rows."""
+    headers = []
+    for line in listing.splitlines():
+        if not line.startswith("| "):
+            continue
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        if cells[0] == "Problem":
+            headers = cells
+        elif headers and cells[0] == f"`{slug}`" and cells[1] == str(round_no):
+            return dict(zip(headers, cells))
+    return {}
+
+
 def build_corpus(root: Path) -> None:
     """A miniature of a real LLD repo: category folders with designs and
     READMEs, corpus-wide docs at the top, and an extensionless junk file."""
@@ -228,9 +246,15 @@ def main() -> int:
           "No mock folder" in server.save_simple_solution("never-posed", "x = 1"))
     check("simple.py classifies as mock-simple", server._lld_kind(simple) == "mock-simple",
           server._lld_kind(simple))
-    check("simple path recorded in the index",
-          any(r.get("simple_path", "").endswith("simple.py")
-              for r in server._load_index().get("lld_mock", [])))
+    # Pin the literal index keys: _save_mock_solution derives them as
+    # f"{role}_path", so a future rename of either role would silently change
+    # what's stored and orphan every record written before it.
+    rec = next(r for r in server._load_index()["lld_mock"]
+               if r["problem_id"] == "design-parking-lot" and r["round"] == 1)
+    check("index key is literally simple_path", rec.get("simple_path", "").endswith("simple.py"),
+          str(sorted(rec)))
+    check("shared helper kept ideal_path unchanged", rec.get("ideal_path", "").endswith("ideal.py"),
+          str(sorted(rec)))
     check("refuses to import a simple solution",
           "not `solution`" in server.import_solved_lld_problem(
               "design-parking-lot", "Mock Solutions/design-parking-lot/simple.py"))
@@ -239,10 +263,54 @@ def main() -> int:
     listing = server.list_mock_attempts()
     check("lists the graded round",
           "`design-parking-lot`" in listing and "Lean Hire" in listing and "2.5/5" in listing)
-    check("listing has a Simple column", "Simple" in listing, listing[:200])
     check("nothing awaiting evaluation yet", "Awaiting evaluation" not in listing, listing[-120:])
+
+    # Per-row, not per-table: catches the Simple column being dropped from the
+    # row tuple even while its header stays in place.
+    row = mock_row(listing, "design-parking-lot", 1)
+    check("row reports every artifact present",
+          [row.get(c) for c in ("Prompt", "Attempt", "Evaluation", "Ideal", "Simple")]
+          == ["yes"] * 5, str(row))
+    check("row keeps score and verdict alongside", row.get("Score") == "2.5/5"
+          and row.get("Verdict") == "Lean Hire", str(row))
+
     server.start_mock_attempt("design-chess-game", "Design a Chess Game", "Full rules.")
     check("ungraded attempts flagged", "Awaiting evaluation" in server.list_mock_attempts())
+    chess = mock_row(server.list_mock_attempts(), "design-chess-game", 1)
+    check("absent simple renders as a dash", chess.get("Simple") == "—", str(chess))
+    check("absent ideal renders as a dash too", chess.get("Ideal") == "—", str(chess))
+
+    # --- simple solution across rounds -------------------------------------
+    server.start_mock_attempt("design-parking-lot", "Design a Parking Lot", "Round two.")
+    simple2 = mock / "design-parking-lot" / "simple_2.py"
+    r = server.save_simple_solution("design-parking-lot", "class Lot2:\n    pass\n", round_no=2)
+    check("round 2 writes simple_2.py", simple2.exists(), r[:100])
+    check("round 2 simple names its round", "(round 2)" in simple2.read_text())
+    # Exercises _lld_kind's startswith(f"{role}_") branch, not the exact-stem one.
+    check("suffixed simple still classifies as mock-simple",
+          server._lld_kind(simple2) == "mock-simple", server._lld_kind(simple2))
+    check("round 1 simple untouched by the round 2 write",
+          (mock / "design-parking-lot" / "simple.py").read_text().count("class X") == 1)
+    # round_no=0 must resolve to the LATEST round (2), so this refuses on
+    # simple_2.py -- if it resolved to round 1 the filename would differ.
+    r0 = server.save_simple_solution("design-parking-lot", "class Nope:\n    pass\n")
+    check("round_no=0 resolves to the latest round",
+          "overwrite was not set" in r0 and "simple_2.py" in r0, r0[:120])
+    listing2 = server.list_mock_attempts("design-parking-lot")
+    check("round 2 listed with simple but no evaluation",
+          mock_row(listing2, "design-parking-lot", 2).get("Simple") == "yes"
+          and mock_row(listing2, "design-parking-lot", 2).get("Evaluation") == "—",
+          str(mock_row(listing2, "design-parking-lot", 2)))
+    check("both rounds listed", mock_row(listing2, "design-parking-lot", 1)
+          and mock_row(listing2, "design-parking-lot", 2))
+    check("ATTEMPT STILL BYTE-IDENTICAL AFTER ROUND 2", sha(attempt) == before)
+
+    # Claude's own simple.py must stay out of the reference corpus scan.
+    check("corpus scan still excludes the mock folder",
+          "simple.py" not in server.scan_lld_directory())
+    body2 = server.read_lld_solution("Mock Solutions/design-parking-lot/simple_2.py")
+    check("read_lld_solution opens simple_2.py and labels its kind",
+          "class Lot2" in body2 and "kind: mock-simple" in body2, body2[:100])
 
     # --- reference-corpus writes ------------------------------------------
     r = server.save_lld_solution("design-tic-tac-toe", "Design Tic Tac Toe", "game design",
