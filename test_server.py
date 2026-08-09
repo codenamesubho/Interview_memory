@@ -24,7 +24,7 @@ EXPECTED_TOOLS = {
     "scan_lld_directory", "read_lld_solution", "import_solved_lld_problem",
     "import_solved_lld_problems", "save_lld_solution",
     "start_mock_attempt", "list_mock_attempts", "save_mock_evaluation",
-    "save_ideal_solution", "get_lld_feedback",
+    "save_ideal_solution", "save_simple_solution", "get_lld_feedback",
 }
 
 
