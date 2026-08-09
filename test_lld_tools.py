@@ -210,10 +210,36 @@ def main() -> int:
     check("refuses ideal with no mock folder",
           "No mock folder" in server.save_ideal_solution("never-posed", "x = 1"))
 
+    # --- simple solution (pared-back companion to ideal.py) ----------------
+    simple = mock / "design-parking-lot" / "simple.py"
+    server.save_simple_solution("design-parking-lot", "class Lot:\n    pass\n",
+                                notes="Dropped the Strategy layer.")
+    check("simple written", simple.exists() and "class Lot" in simple.read_text())
+    check("simple carries notes", "Dropped the Strategy layer." in simple.read_text())
+    check("simple labelled distinctly from ideal", "Simple solution" in simple.read_text())
+    check("simple did not disturb ideal", "class Other" in ideal.read_text())
+    check("ATTEMPT STILL BYTE-IDENTICAL AFTER SIMPLE", sha(attempt) == before)
+    check("refuses to overwrite simple",
+          "overwrite was not set" in server.save_simple_solution("design-parking-lot", "class X:\n    pass\n"))
+    check("simple unchanged after refusal", "class Lot" in simple.read_text())
+    server.save_simple_solution("design-parking-lot", "class X:\n    pass\n", overwrite=True)
+    check("overwrite=True replaces simple", "class X" in simple.read_text())
+    check("refuses simple with no mock folder",
+          "No mock folder" in server.save_simple_solution("never-posed", "x = 1"))
+    check("simple.py classifies as mock-simple", server._lld_kind(simple) == "mock-simple",
+          server._lld_kind(simple))
+    check("simple path recorded in the index",
+          any(r.get("simple_path", "").endswith("simple.py")
+              for r in server._load_index().get("lld_mock", [])))
+    check("refuses to import a simple solution",
+          "not `solution`" in server.import_solved_lld_problem(
+              "design-parking-lot", "Mock Solutions/design-parking-lot/simple.py"))
+
     # --- listing -----------------------------------------------------------
     listing = server.list_mock_attempts()
     check("lists the graded round",
           "`design-parking-lot`" in listing and "Lean Hire" in listing and "2.5/5" in listing)
+    check("listing has a Simple column", "Simple" in listing, listing[:200])
     check("nothing awaiting evaluation yet", "Awaiting evaluation" not in listing, listing[-120:])
     server.start_mock_attempt("design-chess-game", "Design a Chess Game", "Full rules.")
     check("ungraded attempts flagged", "Awaiting evaluation" in server.list_mock_attempts())

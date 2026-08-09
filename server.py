@@ -30,8 +30,9 @@ INTERVIEW_PREP_DIR:
                                   The mock-interview loop: problem.md (posed by
                                   Claude), attempt.py (the USER's own work --
                                   never written or overwritten by this server),
-                                  evaluation.md and ideal.py (Claude's). Later
-                                  rounds are suffixed: attempt_2.py, etc.
+                                  evaluation.md, ideal.py and the pared-back
+                                  simple.py (Claude's). Later rounds are
+                                  suffixed: attempt_2.py, ideal_2.py, etc.
                                   feedback.md at the top of Mock Solutions/ is
                                   the running rubric scorecard.
   DSA_SOLUTIONS_DIR/<topic>/<problem>.py
@@ -64,6 +65,8 @@ LLD mock-interview loop (the user attempts a problem, Claude grades it):
   5. save_mock_evaluation(...)    -- score it against LLD_RUBRIC; this logs the
                                      session and regenerates feedback.md
   6. save_ideal_solution(...)     -- the reference design, beside their attempt
+  7. save_simple_solution(...)    -- optional: the same design pared back to
+                                     what fits in the interview's time box
 The rubric vocabulary is fixed (LLD_RUBRIC) so scores aggregate across
 sessions -- that aggregate is what step 1 reads, closing the loop.
 
@@ -143,7 +146,9 @@ LLD_FEEDBACK_MD = LLD_MOCK_DIR / "feedback.md"
 
 # Roles within one mock problem folder, and the extension each is written with.
 # "attempt" is the user's own file: no tool in this server ever writes over one.
-LLD_MOCK_ROLES = {"problem": "md", "attempt": "py", "evaluation": "md", "ideal": "py"}
+# "simple" is the pared-back companion to "ideal" -- same problem, only what a
+# strong candidate could realistically produce inside the interview's time box.
+LLD_MOCK_ROLES = {"problem": "md", "attempt": "py", "evaluation": "md", "ideal": "py", "simple": "py"}
 
 # Fixed scoring vocabulary. Rubric keys MUST come from this list -- free-form
 # keys would never aggregate across sessions, which is the whole point of
@@ -1600,7 +1605,8 @@ def start_mock_attempt(problem_id: str, title: str, prompt_markdown: str) -> str
     Call this at the START of a mock interview, after picking the problem
     with get_lld_feedback + suggest_next_problems. Then stop and let the user
     write. When they say they're done, read_lld_solution the attempt, then
-    save_mock_evaluation and save_ideal_solution.
+    save_mock_evaluation, save_ideal_solution, and optionally
+    save_simple_solution for the pared-back version.
 
     Never overwrites an existing attempt.py. Calling this again for a problem
     that already has an attempt opens the NEXT round (attempt_2.py, ...), so
@@ -1652,7 +1658,8 @@ def start_mock_attempt(problem_id: str, title: str, prompt_markdown: str) -> str
 def list_mock_attempts(problem_id: str = "") -> str:
     """List the LLD mock-interview folders under "Mock Solutions/": for each
     problem and round, which files exist (problem / attempt / evaluation /
-    ideal), whether the attempt has been graded yet, and the score if it has.
+    ideal / simple), whether the attempt has been graded yet, and the score if
+    it has.
 
     Call this to find work pending evaluation ("did I ever grade that one?"),
     or at the start of a session to see the user's mock history. Use
@@ -1688,7 +1695,7 @@ def list_mock_attempts(problem_id: str = "") -> str:
             rec = evaluations.get((slug, r))
             rows.append((
                 f"`{slug}`", r,
-                mark("problem"), mark("attempt"), mark("evaluation"), mark("ideal"),
+                mark("problem"), mark("attempt"), mark("evaluation"), mark("ideal"), mark("simple"),
                 f"{rec['average']:.1f}/5" if rec and rec.get("average") else "—",
                 rec["verdict"] if rec else "not graded",
             ))
@@ -1700,7 +1707,7 @@ def list_mock_attempts(problem_id: str = "") -> str:
 
     out = [f"Mock attempts under {LLD_MOCK_DIR}:", ""]
     out += _markdown_table(
-        ["Problem", "Round", "Prompt", "Attempt", "Evaluation", "Ideal", "Score", "Verdict"],
+        ["Problem", "Round", "Prompt", "Attempt", "Evaluation", "Ideal", "Simple", "Score", "Verdict"],
         rows,
     )
     if pending:
@@ -1861,7 +1868,67 @@ def save_mock_evaluation(
     return (
         f"Evaluation saved to {path} (average {average:.1f}/5, verdict {verdict.strip()}).\n"
         f"{log_result}\n{feedback_note}{weak_note}\n"
-        "Next: save_ideal_solution to write the reference design alongside the attempt."
+        "Next: save_ideal_solution to write the reference design alongside the "
+        "attempt, then save_simple_solution for the pared-back version."
+    )
+
+
+def _save_mock_solution(
+    role: str,
+    label: str,
+    problem_id: str,
+    code: str,
+    notes: str,
+    round_no: int,
+    overwrite: bool,
+) -> str:
+    """Write one of Claude's own .py files into a mock problem folder, beside
+    the user's attempt. Shared by save_ideal_solution and
+    save_simple_solution, which differ only in the role they write (and so in
+    the filename, docstring header and index key).
+    """
+    slug = _slugify(problem_id)
+    round_no = _resolve_round(slug, round_no)
+    path = _mock_file(slug, role, round_no)
+
+    if not _in_lld_root(path) or not _is_mock_path(path):
+        return f"Refusing to write outside {LLD_MOCK_DIR}."
+    # Belt-and-braces: _mock_file builds the name from LLD_MOCK_ROLES, so this
+    # can't fire today -- kept so any future change to that helper can't turn
+    # these tools into something that clobbers the user's own work.
+    if not path.name.startswith(role):
+        return f"Refusing to write {path.name}: this tool only ever writes {role}*.py."
+    if not _mock_dir(slug).exists():
+        return (
+            f"No mock folder for `{slug}` at {_mock_dir(slug)}. Use "
+            "start_mock_attempt first, or check the id with list_mock_attempts."
+        )
+    if path.exists() and not overwrite:
+        return (
+            f"{path} already exists and overwrite was not set. Pass "
+            "overwrite=True if you intend to replace it."
+        )
+
+    today = date.today().isoformat()
+    parts = [f'"""\n{label} — `{slug}` (round {round_no}), written {today}.\n']
+    if notes.strip():
+        parts.append(f"\n{notes.strip()}\n")
+    parts.append('"""\n\n')
+    parts.append(code.strip() + "\n")
+    path.write_text("".join(parts), encoding="utf-8")
+
+    index = _load_index()
+    for rec in reversed(index.get("lld_mock", [])):
+        if rec["problem_id"] == slug and rec["round"] == round_no:
+            rec[f"{role}_path"] = str(path.resolve())
+            break
+    _save_index(index)
+    _regenerate_lld_feedback()
+
+    attempt = _mock_file(slug, "attempt", round_no)
+    return (
+        f"{label} saved to {path}.\n"
+        f"Compare against the attempt: {attempt}"
     )
 
 
@@ -1876,6 +1943,10 @@ def save_ideal_solution(problem_id: str, code: str, notes: str = "", round_no: i
     flagged as missing in the evaluation, and a demo under
     `if __name__ == "__main__":`. Address the specific gaps you scored down.
 
+    This is the thorough reference version — write it without worrying about
+    how long it would take to produce live. For the cut-down version that
+    actually fits an interview, follow up with save_simple_solution.
+
     This tool can only ever write a file named ideal*.py, so it cannot touch
     the user's attempt. It also refuses to replace an existing ideal solution
     unless overwrite=True.
@@ -1888,49 +1959,41 @@ def save_ideal_solution(problem_id: str, code: str, notes: str = "", round_no: i
         round_no: Which round this is the ideal for. 0 (default) = latest.
         overwrite: Set True to replace an existing ideal solution.
     """
-    slug = _slugify(problem_id)
-    round_no = _resolve_round(slug, round_no)
-    path = _mock_file(slug, "ideal", round_no)
+    return _save_mock_solution("ideal", "Ideal solution", problem_id, code, notes, round_no, overwrite)
 
-    if not _in_lld_root(path) or not _is_mock_path(path):
-        return f"Refusing to write outside {LLD_MOCK_DIR}."
-    # Belt-and-braces: _mock_file builds the name from LLD_MOCK_ROLES, so this
-    # can't fire today -- kept so any future change to that helper can't turn
-    # this tool into something that clobbers the user's own work.
-    if not path.name.startswith("ideal"):
-        return f"Refusing to write {path.name}: this tool only ever writes ideal*.py."
-    if not _mock_dir(slug).exists():
-        return (
-            f"No mock folder for `{slug}` at {_mock_dir(slug)}. Use "
-            "start_mock_attempt first, or check the id with list_mock_attempts."
-        )
-    if path.exists() and not overwrite:
-        return (
-            f"{path} already exists and overwrite was not set. Pass "
-            "overwrite=True if you intend to replace it."
-        )
 
-    today = date.today().isoformat()
-    parts = [f'"""\nIdeal solution — `{slug}` (round {round_no}), written {today}.\n']
-    if notes.strip():
-        parts.append(f"\n{notes.strip()}\n")
-    parts.append('"""\n\n')
-    parts.append(code.strip() + "\n")
-    path.write_text("".join(parts), encoding="utf-8")
+@mcp.tool()
+def save_simple_solution(problem_id: str, code: str, notes: str = "", round_no: int = 0, overwrite: bool = False) -> str:
+    """Write a SIMPLER version of the ideal solution for a mock LLD problem, as
+    simple.py in that problem's "Mock Solutions/" folder, alongside ideal.py
+    and the user's attempt.
 
-    index = _load_index()
-    for rec in reversed(index.get("lld_mock", [])):
-        if rec["problem_id"] == slug and rec["round"] == round_no:
-            rec["ideal_path"] = str(path.resolve())
-            break
-    _save_index(index)
-    _regenerate_lld_feedback()
+    ideal.py is the thorough reference design; simple.py is the same problem
+    solved with the minimum that would still pass — the core classes and the
+    one or two patterns that genuinely earn their place, with the extension
+    points, secondary abstractions and exhaustive edge-case handling left out.
+    It's the version a strong candidate could realistically finish inside the
+    interview's time box, so the user has a target that's actually reachable
+    under time pressure as well as one to aspire to.
 
-    attempt = _mock_file(slug, "attempt", round_no)
-    return (
-        f"Ideal solution saved to {path}.\n"
-        f"Compare against the attempt: {attempt}"
-    )
+    Call this after save_ideal_solution, on the same problem and round. It's
+    optional — skip it when the ideal is already small enough that a pared-back
+    version would be identical. The notes are the useful part: say explicitly
+    what you dropped relative to the ideal and what it would cost.
+
+    This tool can only ever write a file named simple*.py, so it cannot touch
+    the user's attempt or the ideal. It refuses to replace an existing simple
+    solution unless overwrite=True.
+
+    Args:
+        problem_id: The mock problem's id (as used by start_mock_attempt).
+        code: The full pared-back Python design, authored by you.
+        notes: Optional prose added to the module docstring — what was cut
+            relative to ideal.py, and what that trade-off costs.
+        round_no: Which round this is the simple version for. 0 (default) = latest.
+        overwrite: Set True to replace an existing simple solution.
+    """
+    return _save_mock_solution("simple", "Simple solution", problem_id, code, notes, round_no, overwrite)
 
 
 def _regenerate_lld_feedback() -> str:
