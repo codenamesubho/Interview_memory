@@ -16,7 +16,7 @@ Session/tracking data, under `~/interview-prep/` by default:
 
 - **`DSA_SOLUTIONS_DIR`** (e.g. `~/code/DSA_mock`) — organized as `<Topic_Folder>/<problem>.py`, one real Python file per problem grouped by topic, matching a typical personal LeetCode-practice layout. DSA is code, not markdown — see `save_dsa_solution` below.
 - **`HLD_SOLUTIONS_DIR`** (e.g. `~/code/HLD`) — one markdown file per HLD problem (e.g. `design-rate-limiter.md`).
-- **`LLD_SOLUTIONS_DIR`** (e.g. `~/code/LLD`) — holds two separate things: the **reference corpus** of your own designs, one self-contained `.py` per problem grouped into category folders (`1_state_machine/vending_machine.py`), plus flat `design-parking-lot.md` write-ups from `save_practice_doc`; and **`Mock Solutions/`**, the mock-interview loop where you attempt a problem and Claude grades it. See [LLD mock interviews](#lld-mock-interviews) below.
+- **`LLD_SOLUTIONS_DIR`** (e.g. `~/code/LLD`) — holds two separate things: the **reference corpus** of your own designs, one self-contained `.py` per problem grouped into category folders (`1_state_machine/vending_machine.py`), plus flat `design-parking-lot.md` write-ups from `save_practice_doc`; and **`Mock Solutions/`**, the mock-interview loop where you attempt a problem and Claude grades it. See [LLD mock interviews](#lld-mock-interviews) below. A third file, **`DRILL_LOG.md`**, sits at the top level: one running, append-only log of short LLD drills (see [LLD drills](#lld-drills)).
 - **`BEHAVIORAL_SOLUTIONS_DIR`** (e.g. `~/code/Behavioral`) — holds a single `candidate_context.md`: your reusable background + STAR story bank, with a "Current Focus" section you refresh per company/role. See `save_candidate_context` below.
 
 ## Tools exposed to Claude
@@ -46,6 +46,8 @@ Session/tracking data, under `~/interview-prep/` by default:
 | `save_ideal_solution` | Write the interviewer's reference design as `ideal.py`, beside your attempt. Can only ever write `ideal*.py`, so it cannot touch your own file |
 | `save_simple_solution` | Write a pared-back version of that design as `simple.py` — what a strong candidate could realistically finish in the time box. Can only ever write `simple*.py` |
 | `get_lld_feedback` | Rubric averages, weakest dimensions, and attempt history — call this *before* `suggest_next_problems("LLD")` to aim the next question |
+| `log_lld_drill` | Append one short LLD drill to `DRILL_LOG.md` — a quick rep that doesn't warrant a whole mock folder. Feeds the same weak-area tracker as `log_session` |
+| `get_lld_drill_log` | Read back the last N drills — call at the start of a drill session so the next reps build on the last ones |
 | `get_session_detail` | Revisit the full log entry for one past session |
 | `resolve_weak_area` | Remove a weak area once you've demonstrably improved at it |
 
@@ -101,7 +103,7 @@ Claude will call `scan_dsa_directory()`, read each file's problem-statement snip
 
 > Scan my LLD directory and import everything you can confidently match to the catalog.
 
-`scan_lld_directory()` returns every file with a **Kind** column — `solution` (a per-problem design), `category-doc` (a folder README), `aggregate-doc` (`INDEX.md`, `QUICK_REFERENCE.md` and friends, which span many problems), `practice-doc` (a markdown write-up this server wrote via `save_practice_doc`), or `other`. Only `solution` rows are importable; `import_solved_lld_problem(s)` refuses the rest, so an index file can never get linked to a single problem. Claude matches filenames to catalog ids by judgment (`8_lru_cache.py` → `design-lru-cache-oop`), and roughly half the corpus isn't in the 25-entry built-in LLD catalog at all (`order_lifecycle.py`, `whatsapp_messaging.py`, `audit_trail.py`, …) — those need `add_custom_problem` first. Nothing under `~/code/LLD` is modified; only `index.json` is written.
+`scan_lld_directory()` returns every file with a **Kind** column — `solution` (a per-problem design), `category-doc` (a folder README), `aggregate-doc` (`INDEX.md`, `QUICK_REFERENCE.md` and friends, which span many problems), `practice-doc` (a markdown write-up this server wrote via `save_practice_doc`), `drill-log` (`DRILL_LOG.md`), or `other`. Only `solution` rows are importable; `import_solved_lld_problem(s)` refuses the rest, so an index file can never get linked to a single problem. Claude matches filenames to catalog ids by judgment (`8_lru_cache.py` → `design-lru-cache-oop`), and roughly half the corpus isn't in the 25-entry built-in LLD catalog at all (`order_lifecycle.py`, `whatsapp_messaging.py`, `audit_trail.py`, …) — those need `add_custom_problem` first. Nothing under `~/code/LLD` is modified; only `index.json` is written.
 
 ## LLD mock interviews
 
@@ -144,6 +146,23 @@ Re-attempting a problem later opens the next round (`attempt_2.py`, `evaluation_
 Scores accumulate in `index.json` under `lld:`-prefixed keys (kept apart from Behavioral competency scores, which share that store), and surface in three places: `feedback.md` for you to read, `get_lld_feedback()` and `get_progress_summary()` for Claude, and a weakest-dimensions note appended to `suggest_next_problems("LLD")`. That last one matters — the generic weak-area ranking matches against catalog *topics*, and every LLD topic starts with "OOP Design", so without the rubric the feedback would never actually change what gets asked.
 
 **Safety.** `attempt.py` is yours: `start_mock_attempt` refuses to overwrite one, `save_ideal_solution` can only ever write a file named `ideal*.py`, and `save_simple_solution` only `simple*.py`. Scans and imports exclude `Mock Solutions/` entirely, so Claude's own output can never be backfilled into the tracker as your finished work.
+
+## LLD drills
+
+A drill is a short focused rep — one pattern, one class hierarchy, one "how would you extend this" — not a full mock interview. Drills don't get a folder, a prompt file or rubric scores; they all append to a single running log:
+
+```
+~/code/LLD/DRILL_LOG.md      # newest drill at the bottom, entries split by ---
+```
+
+Claude calls `get_lld_drill_log()` at the start of a drill session to see what you covered last time, and `log_lld_drill(...)` after each rep. The signature:
+
+```
+log_lld_drill(topic, content_markdown, problem_id="", duration_minutes=0, gaps="")
+get_lld_drill_log(limit=5)          # limit=0 returns the whole file
+```
+
+`content_markdown` is the whole entry body, written by Claude — start its headings at `###` and don't put a bare `---` rule inside it, since `##` and `---` are what separate one drill from the next. `gaps` is a semicolon-separated list in the same vocabulary as `log_session`, and feeds the same weak-area counts that `get_progress_summary` reports. Passing `problem_id` also counts the drill as an attempt on that problem in the tracker — including refreshing its "last practiced" date, so a drill postpones that problem's next revision — but never unlinks a doc `save_practice_doc` wrote for it.
 
 ## Wiring it into your practice routine
 
@@ -189,7 +208,7 @@ A stdio-transport MCP server (what this is) isn't a background daemon you start 
 Four ways to check it's actually working, in increasing order of realism:
 
 1. **Does it even boot?** `python3 server.py` from this folder — should start and hang silently (that's correct; it's waiting for a client on stdin). Ctrl+C to stop.
-2. **Does it speak MCP correctly?** `python3 test_server.py` — spawns the server as a real MCP client would, does the protocol handshake, lists all 26 tools, and calls `get_progress_summary` for real. Read-only, safe to run anytime. A clean "All checks passed" means the server itself is solid, independent of Claude Desktop.
+2. **Does it speak MCP correctly?** `python3 test_server.py` — spawns the server as a real MCP client would, does the protocol handshake, lists all 29 tools, and calls `get_progress_summary` for real. Read-only, safe to run anytime. A clean "All checks passed" means the server itself is solid, independent of Claude Desktop.
 3. **Do the LLD tools actually behave?** `python3 test_lld_tools.py` — builds a synthetic design repo in a temp directory and exercises every LLD tool against it: path guards, kind classification, rubric validation, the full mock loop, and above all that `attempt.py` comes out byte-identical to what was written. Hermetic — it never touches `~/code/LLD` or your real `index.json`.
 4. **Is Claude Desktop actually using it?**
    - Open a chat and look at the tools/connectors icon near the input box — `interview-memory` should be listed with its tool count.
