@@ -15,7 +15,7 @@ Session/tracking data, under `~/interview-prep/` by default:
 **Per-problem solutions/docs live in four independent, separately configurable directories** — each defaults to a folder under `~/interview-prep/docs/` but is normally pointed at wherever your real practice work lives:
 
 - **`DSA_SOLUTIONS_DIR`** (e.g. `~/code/DSA_mock`) — organized as `<Topic_Folder>/<problem>.py`, one real Python file per problem grouped by topic, matching a typical personal LeetCode-practice layout. DSA is code, not markdown — see `save_dsa_solution` below.
-- **`HLD_SOLUTIONS_DIR`** (e.g. `~/code/HLD`) — one markdown file per HLD problem (e.g. `design-rate-limiter.md`).
+- **`HLD_SOLUTIONS_DIR`** (e.g. `~/code/HLD`) — one markdown file per HLD problem (e.g. `design-rate-limiter.md`), plus **`Mock Solutions/`**, the HLD mock loop: one dated folder per attempt holding the reference Claude froze *before* posing the problem, what you actually designed, the diff between them, and the scored evaluation. See [HLD mock interviews](#hld-mock-interviews) below.
 - **`LLD_SOLUTIONS_DIR`** (e.g. `~/code/LLD`) — holds two separate things: the **reference corpus** of your own designs, one self-contained `.py` per problem grouped into category folders (`1_state_machine/vending_machine.py`), plus flat `design-parking-lot.md` write-ups from `save_practice_doc`; and **`Mock Solutions/`**, the mock-interview loop where you attempt a problem and Claude grades it. See [LLD mock interviews](#lld-mock-interviews) below. A third file, **`DRILL_LOG.md`**, sits at the top level: one running, append-only log of short LLD drills (see [LLD drills](#lld-drills)).
 - **`BEHAVIORAL_SOLUTIONS_DIR`** (e.g. `~/code/Behavioral`) — holds a single `candidate_context.md`: your reusable background + STAR story bank, with a "Current Focus" section you refresh per company/role. See `save_candidate_context` below.
 
@@ -40,6 +40,13 @@ Session/tracking data, under `~/interview-prep/` by default:
 | `read_lld_solution` | Open ONE LLD file in full — a past design, a corpus doc, or a mock attempt you're about to grade |
 | `import_solved_lld_problem(s)` | Backfill the tracker from an LLD design already on disk, *without* touching the file. Refuses anything that isn't `kind=solution` |
 | `save_lld_solution` | Write a NEW design into the reference corpus, in the right category folder; refuses to overwrite unless told to |
+| `start_hld_mock_attempt` | Freeze the grading reference BEFORE posing an HLD problem — creates `Mock Solutions/<date>-<id>/` with `reference.md`. Refuses to overwrite an existing reference; `written_at` comes from the server clock so it can't be backdated |
+| `save_hld_attempt` | Capture what you actually designed as `attempt.md` — your near-verbatim turns first, then the interviewer's structured rendering and an explicit list of what you only reached after being prompted |
+| `save_hld_diff` | Compare attempt against the frozen reference: matched / **missed invariants** (real gaps) / **diverged at choice points** (fine if the reasoning held), flows as well as boxes. Errors if either side is missing |
+| `save_hld_evaluation` | Score an HLD mock against the fixed 7-dimension rubric — writes `evaluation.md`, records the scores and logs the session (so no separate `log_session` for HLD mocks) |
+| `list_hld_mock_attempts` | Every HLD attempt folder: which of the four files exist, verdicts, and which attempts were left incomplete |
+| `read_hld_mock_file` | Open one of `reference.md` / `attempt.md` / `diff.md` / `evaluation.md` in full |
+| `get_hld_feedback` | HLD rubric averages, weakest dimensions, recent verdicts at level — call at session start so the problem choice targets the weak dimensions |
 | `start_mock_attempt` | Pose an LLD problem — creates `Mock Solutions/<id>/` with `problem.md` and an `attempt.py` stub for *you* to fill in. Never overwrites an existing attempt; re-posing opens the next round |
 | `list_mock_attempts` | Every mock problem and round: which files exist, what's still awaiting grading, scores and verdicts |
 | `save_mock_evaluation` | Grade an attempt against the fixed 7-dimension rubric — writes `evaluation.md`, logs the session, and regenerates `feedback.md` |
@@ -106,6 +113,51 @@ Claude will call `scan_dsa_directory()`, read each file's problem-statement snip
 
 `scan_lld_directory()` returns every file with a **Kind** column — `solution` (a per-problem design), `category-doc` (a folder README), `aggregate-doc` (`INDEX.md`, `QUICK_REFERENCE.md` and friends, which span many problems), `practice-doc` (a markdown write-up this server wrote via `save_practice_doc`), `drill-log` (`DRILL_LOG.md`), or `other`. Only `solution` rows are importable; `import_solved_lld_problem(s)` refuses the rest, so an index file can never get linked to a single problem. Claude matches filenames to catalog ids by judgment (`8_lru_cache.py` → `design-lru-cache-oop`), and roughly half the corpus isn't in the 25-entry built-in LLD catalog at all (`order_lifecycle.py`, `whatsapp_messaging.py`, `audit_trail.py`, …) — those need `add_custom_problem` first. Nothing under `~/code/LLD` is modified; only `index.json` is written.
 
+## HLD mock interviews
+
+Same loop as LLD, with one structural difference: **the reference is written and frozen before you're asked the question.** Claude generates its grading reference, `start_hld_mock_attempt` puts it on disk, and only then does the interview start. A reference that still lives in the model's context can drift under your pushback; one on disk can't.
+
+```
+~/code/HLD/Mock Solutions/
+  2026-08-21-design-distributed-task-scheduler/
+    reference.md       # frozen BEFORE the problem was posed; written_at is the server's clock
+    attempt.md         # what you actually designed, warts intact
+    diff.md            # matched / missed invariants / diverged at choice points
+    evaluation.md      # verdict, verdict-at-level, seven-dimension scorecard
+```
+
+One folder per *attempt*, named `YYYY-MM-DD-<problem-id>`; a second attempt at the same problem on the same day is `-r2`. Attempting a problem again never lands on the earlier evidence.
+
+**The flow.** Say:
+
+> Let's do a mock HLD interview.
+
+1. Claude calls `get_hld_feedback()` and `get_catalog("HLD")`, picks a problem aimed at your weakest dimensions, generates its reference, and calls `start_hld_mock_attempt(...)` — **before** giving you the prompt.
+2. You do the interview.
+3. At the end: `save_hld_attempt(...)` → `save_hld_diff(...)` → `save_hld_evaluation(...)` → `save_practice_doc(...)`.
+
+**Attempt vs. practice doc.** The attempt folder holds the evidence, ungroomed; the practice doc holds the correct design. Keeping them apart is the whole point — an attempt rewritten toward the right answer reads clean six weeks later and tells you nothing about which parts you actually got right. Nothing under `Mock Solutions/` is ever surfaced by `list_practice_docs`.
+
+**`raw_turns` is the load-bearing argument** of `save_hld_attempt`. Written from memory instead, the attempt gets unconsciously tidied — a justification you never gave gets filled in, an explanation that doubled back gets straightened — and the diff then grades a cleaned-up version of what happened. `attempt.md` also carries an explicit *arrived-at-only-after-prompting* list: what you reached only once the gap was named, with the prompting question quoted.
+
+**Missed vs. diverged.** `save_hld_diff` separates a missing reference **invariant** (a real gap) from a different option taken at a **choice point** (not a gap if the trade-off reasoning was sound). The diff compares end-to-end flows too, not just which components got named — two designs can list identical boxes and route a request completely differently.
+
+**The rubric**, seven dimensions, 1-5, matching the `hld-interviewer` skill's scorecard, stored under `hld:`-prefixed keys in `index.json`:
+
+| Dimension | What it measures |
+|---|---|
+| `requirements` | Functional/non-functional, what got pinned down |
+| `capacity-estimation` | Whether you justified the numbers yourself |
+| `architecture` | Component design, and whether each box is warranted |
+| `deep-dives` | Depth on the hard parts under drilling |
+| `scale-calibration` | Reading the stated numbers vs. pattern-matching to FAANG scale |
+| `communication` | Structure, signposting, driving the session |
+| `composure` | Behaviour under pushback and persona pressure |
+
+Free-form keys are rejected — the aggregate is the whole value, and keys that vary per session never aggregate.
+
+**End-to-end flows.** Every HLD design document — `reference.md` and anything `save_practice_doc` writes — should carry an `## End-to-end flows` section right after the architecture diagram: at least three numbered flows (write path, primary read-or-execute path, failure/recovery path), each step naming the component, the operation and the datastore touched. A diagram shows what exists; this shows what happens. Its absence is a **warning in the tool result, not an error** — the doc still gets written.
+
 ## LLD mock interviews
 
 The loop that turns practice into targeted practice. You write the design yourself; Claude grades it as the interviewer and remembers where you're weak.
@@ -171,7 +223,7 @@ get_lld_drill_log(limit=5)          # limit=0 returns the whole file
 
 Say this at the start of a chat (or bake it into a Claude Desktop project/skill):
 
-> At the start of every practice session, call `get_progress_summary`, then `suggest_next_problems` for the type we're practicing (DSA/HLD/LLD) and let me pick from the top few. For LLD also call `get_lld_feedback` first and aim the pick at my weakest rubric dimensions. After we solve/discuss it, call `log_session` (with `problem_id` set). Then for HLD/LLD call `save_practice_doc` with the full write-up (HLD: requirements, capacity estimate, architecture, API/data model, trade-offs; LLD: class design, patterns used, key decisions). For DSA, if the problem isn't already on disk, call `save_dsa_solution` with the final code and a short explanation.
+> At the start of every practice session, call `get_progress_summary`, then `suggest_next_problems` for the type we're practicing (DSA/HLD/LLD) and let me pick from the top few. For LLD also call `get_lld_feedback` first and aim the pick at my weakest rubric dimensions; for HLD call `get_hld_feedback` first for the same reason. After we solve/discuss it, call `log_session` (with `problem_id` set). Then for HLD/LLD call `save_practice_doc` with the full write-up (HLD: requirements, capacity estimate, architecture, API/data model, trade-offs; LLD: class design, patterns used, key decisions). For DSA, if the problem isn't already on disk, call `save_dsa_solution` with the final code and a short explanation.
 >
 > If I say I want to *attempt* an LLD problem myself rather than discuss it, run the mock loop instead: `start_mock_attempt`, wait for me to write `attempt.py`, then `read_lld_solution`, `save_mock_evaluation` (score honestly — inflated scores break the feedback loop), `save_ideal_solution`, and `save_simple_solution` for the cut-down version.
 
@@ -211,9 +263,10 @@ A stdio-transport MCP server (what this is) isn't a background daemon you start 
 Four ways to check it's actually working, in increasing order of realism:
 
 1. **Does it even boot?** `python3 server.py` from this folder — should start and hang silently (that's correct; it's waiting for a client on stdin). Ctrl+C to stop.
-2. **Does it speak MCP correctly?** `python3 test_server.py` — spawns the server as a real MCP client would, does the protocol handshake, lists all 29 tools, and calls `get_progress_summary` for real. Read-only, safe to run anytime. A clean "All checks passed" means the server itself is solid, independent of Claude Desktop.
+2. **Does it speak MCP correctly?** `python3 test_server.py` — spawns the server as a real MCP client would, does the protocol handshake, lists all 37 tools, and calls `get_progress_summary` for real. Read-only, safe to run anytime. A clean "All checks passed" means the server itself is solid, independent of Claude Desktop.
 3. **Do the LLD tools actually behave?** `python3 test_lld_tools.py` — builds a synthetic design repo in a temp directory and exercises every LLD tool against it: path guards, kind classification, rubric validation, the full mock loop, and above all that `attempt.py` comes out byte-identical to what was written. Hermetic — it never touches `~/code/LLD` or your real `index.json`.
-4. **Is Claude Desktop actually using it?**
+4. **Do the HLD mock tools actually behave?** `python3 test_hld_tools.py` — builds a synthetic HLD root in a temp directory and walks the acceptance checklist: a frozen `reference.md` can't be overwritten, `written_at` comes from the server clock, a diff with only one side errors, a rubric key outside the fixed seven is rejected, `Mock Solutions/` never leaks into `list_practice_docs`, a doc with no `## End-to-end flows` warns but still writes, and `get_hld_feedback` on an empty history returns cleanly. Hermetic — it never touches `~/code/HLD` or your real `index.json`.
+5. **Is Claude Desktop actually using it?**
    - Open a chat and look at the tools/connectors icon near the input box — `interview-memory` should be listed with its tool count.
    - `ps aux | grep server.py` — while Desktop is open, you should see a live `python3 .../server.py` process (Desktop spawns it once you open a chat that uses it, or at startup depending on version).
    - Logs: `~/Library/Logs/Claude/mcp-server-interview-memory.log`.
@@ -226,8 +279,9 @@ This server only ever runs over **stdio** (`mcp.run(transport="stdio")`), the sa
 Within the local filesystem, a few guardrails are worth knowing about since Claude drives these tools somewhat autonomously:
 
 - **Path sanitization.** Every value used to build a filename (`problem_id`, problem titles) is passed through a slugifier that strips everything except `a-z 0-9 -` before it ever touches a path. A value like `../../etc/passwd` becomes `etc-passwd`, not a traversal — verified with an adversarial test during development.
-- **Directory containment.** `save_practice_doc` can only write inside `HLD_SOLUTIONS_DIR` or `LLD_SOLUTIONS_DIR` (whichever matches the call); `save_dsa_solution` can only write inside `DSA_SOLUTIONS_DIR`; `save_candidate_context`/`get_candidate_context` are confined to `BEHAVIORAL_SOLUTIONS_DIR`; `import_solved_dsa_problem(s)` can only *link* to files that already live inside `DSA_SOLUTIONS_DIR` (it refuses anything outside it, e.g. `~/.ssh/`, `/etc/`); `get_practice_doc` re-checks that whatever `index.json` points at is still inside the allowed directory for that problem type before reading it.
+- **Directory containment.** `save_practice_doc` can only write inside `HLD_SOLUTIONS_DIR` or `LLD_SOLUTIONS_DIR` (whichever matches the call); the HLD mock tools take a caller-supplied `attempt_folder` and resolve it against `HLD_SOLUTIONS_DIR/Mock Solutions/`, refusing anything that lands outside it (and `read_hld_mock_file` only accepts the four known filenames, so `filename` can't name anything else); `save_dsa_solution` can only write inside `DSA_SOLUTIONS_DIR`; `save_candidate_context`/`get_candidate_context` are confined to `BEHAVIORAL_SOLUTIONS_DIR`; `import_solved_dsa_problem(s)` can only *link* to files that already live inside `DSA_SOLUTIONS_DIR` (it refuses anything outside it, e.g. `~/.ssh/`, `/etc/`); `get_practice_doc` re-checks that whatever `index.json` points at is still inside the allowed directory for that problem type before reading it.
 - **No code execution.** The server only reads and writes text files. It never `exec`s, `eval`s, or runs the DSA solutions it stores — `code`/`content_markdown` arguments are treated purely as bytes to persist.
+- **Pre-commitment protection.** `start_hld_mock_attempt` refuses to overwrite an existing `reference.md` outright — there is no `overwrite` flag, because a reference that can be rewritten after the candidate has spoken isn't a reference. A genuine re-attempt opens a new `-r2` folder instead. Its `written_at` comes from the server's own clock, not a tool argument, so it can't be backdated.
 - **Overwrite protection.** `save_dsa_solution` refuses to replace an existing file unless `overwrite=True` is passed explicitly, since `DSA_SOLUTIONS_DIR` is assumed to hold real, hand-written work. (`save_practice_doc` for HLD/LLD, and `save_candidate_context` for Behavioral, do overwrite by design — they hold Claude's latest write-up/profile, and those directories are managed entirely by this server.)
 - **Env-var-scoped roots.** `INTERVIEW_PREP_DIR`, `DSA_SOLUTIONS_DIR`, `HLD_SOLUTIONS_DIR`, `LLD_SOLUTIONS_DIR`, and `BEHAVIORAL_SOLUTIONS_DIR` are only ever set by you, in your own Claude Desktop config — they aren't something a chat message can override.
 
