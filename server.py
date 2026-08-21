@@ -52,6 +52,9 @@ Design goal: Claude loads a COMPACT summary at session start
 (get_progress_summary), not old transcripts or full docs. Full detail for a
 specific session or problem is fetched on demand.
 
+get_current_time() reports this machine's wall clock (local, UTC, epoch) --
+call it to time a rep or to check today's date, rather than assuming either.
+
 Typical flow:
   1. get_progress_summary()                     -- orient at the start
   2. suggest_next_problems("DSA")                -- or "HLD" / "LLD"
@@ -75,7 +78,8 @@ sessions -- that aggregate is what step 1 reads, closing the loop.
 
 LLD drills (short focused reps, no rubric, no per-problem folder):
   1. get_lld_drill_log()   -- what was drilled recently, what's unresolved
-  2. ... run the drill with the user ...
+  2. ... run the drill with the user ...  (get_current_time at both ends
+                               gives the duration_minutes below)
   3. log_lld_drill(...)     -- append it to DRILL_LOG.md; gaps feed the same
                                weak-area tracker log_session writes to.
 
@@ -88,7 +92,7 @@ One-time / occasional housekeeping:
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -263,6 +267,14 @@ def _ensure_revision_md() -> None:
             "Newest sessions are appended at the bottom.\n",
             encoding="utf-8",
         )
+
+
+def _now() -> datetime:
+    """The current local wall-clock time, timezone-aware. Local (not UTC) so
+    its .date() always agrees with the date.today() every log writer stamps --
+    a UTC clock would report a different day either side of midnight and make
+    get_current_time contradict revision.md."""
+    return datetime.now().astimezone()
 
 
 def _days_since(iso_date: str) -> int:
@@ -636,6 +648,37 @@ def _mock_history_rows(records: List[dict], limit: int = 0) -> List[tuple]:
             weakest,
         ))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Tools: the clock
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_current_time() -> str:
+    """Read the current wall-clock time on this machine. Call this whenever
+    the actual clock matters rather than your own assumption about it:
+
+      - timing a rep: call it when the user starts and again when they
+        finish, and pass the difference as log_lld_drill(duration_minutes=...)
+        or as the time box in a mock evaluation;
+      - answering "how long did that take" / "how much time is left" during a
+        timed mock;
+      - checking today's date before talking about revision scheduling (this
+        is the same date every log writer here stamps).
+
+    Returns the local time, the UTC equivalent and the epoch seconds. The
+    local date is authoritative: log_session, log_lld_drill and
+    save_practice_doc all stamp that date, so quote it (not the UTC one) when
+    referring to "today".
+    """
+    now = _now()
+    return "\n".join([
+        f"Local: {now.isoformat(timespec='seconds')} ({now.strftime('%A, %d %B %Y, %H:%M:%S %Z')})",
+        f"UTC:   {now.astimezone(timezone.utc).isoformat(timespec='seconds')}",
+        f"Epoch: {int(now.timestamp())}",
+        f"Today (as stamped in revision.md / DRILL_LOG.md): {now.date().isoformat()}",
+    ])
 
 
 # ---------------------------------------------------------------------------

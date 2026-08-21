@@ -25,7 +25,7 @@ EXPECTED_TOOLS = {
     "import_solved_lld_problems", "save_lld_solution",
     "start_mock_attempt", "list_mock_attempts", "save_mock_evaluation",
     "save_ideal_solution", "save_simple_solution", "get_lld_feedback",
-    "log_lld_drill", "get_lld_drill_log",
+    "log_lld_drill", "get_lld_drill_log", "get_current_time",
 }
 
 

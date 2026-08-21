@@ -1,5 +1,6 @@
 """
-Hermetic tests for the LLD corpus tools and the mock-interview loop.
+Hermetic tests for the LLD corpus tools, the mock-interview loop and the
+clock tool (get_current_time, which the drill flow leans on for durations).
 
 Builds a synthetic LLD_SOLUTIONS_DIR in a temp directory (mirroring the shape
 of a real design repo: numbered category folders, corpus-wide docs, junk) and
@@ -20,6 +21,7 @@ import importlib
 import os
 import sys
 import tempfile
+from datetime import date, datetime
 from pathlib import Path
 
 FAILS = []
@@ -382,6 +384,27 @@ def main() -> int:
           server._lld_kind(drill_log) == "drill-log", server._lld_kind(drill_log))
     check("drill log not mistaken for a corpus index",
           "| drill-log |" in server.scan_lld_directory())
+
+    # --- the clock ---------------------------------------------------------
+    print("\n-- get_current_time --")
+    clock = server.get_current_time()
+    local_line = next((l for l in clock.splitlines() if l.startswith("Local: ")), "")
+    stamp = local_line[len("Local: "):].split(" (")[0]
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(stamp)
+    except ValueError:
+        pass
+    check("local time parses as ISO 8601", parsed is not None, stamp)
+    check("local time is timezone-aware", parsed is not None and parsed.utcoffset() is not None, stamp)
+    # The whole point of using a local clock: it must never disagree with the
+    # date every log writer stamps, or the tool contradicts revision.md.
+    check("local date agrees with the date the log writers stamp",
+          parsed is not None and parsed.date() == date.today(), stamp)
+    check("today's date reported explicitly",
+          f"Today (as stamped in revision.md / DRILL_LOG.md): {date.today().isoformat()}" in clock, clock)
+    check("UTC and epoch reported too",
+          "UTC:   " in clock and "Epoch: " in clock, clock)
 
     print()
     if FAILS:

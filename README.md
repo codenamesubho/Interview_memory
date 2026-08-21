@@ -48,6 +48,7 @@ Session/tracking data, under `~/interview-prep/` by default:
 | `get_lld_feedback` | Rubric averages, weakest dimensions, and attempt history — call this *before* `suggest_next_problems("LLD")` to aim the next question |
 | `log_lld_drill` | Append one short LLD drill to `DRILL_LOG.md` — a quick rep that doesn't warrant a whole mock folder. Feeds the same weak-area tracker as `log_session` |
 | `get_lld_drill_log` | Read back the last N drills — call at the start of a drill session so the next reps build on the last ones |
+| `get_current_time` | Read this machine's wall clock (local, UTC, epoch) — to time a rep (call at both ends, pass the delta as `duration_minutes`) or to check today's date instead of assuming it |
 | `get_session_detail` | Revisit the full log entry for one past session |
 | `resolve_weak_area` | Remove a weak area once you've demonstrably improved at it |
 
@@ -161,6 +162,8 @@ Claude calls `get_lld_drill_log()` at the start of a drill session to see what y
 log_lld_drill(topic, content_markdown, problem_id="", duration_minutes=0, gaps="")
 get_lld_drill_log(limit=5)          # limit=0 returns the whole file
 ```
+
+`duration_minutes` doesn't have to be guessed: Claude can call `get_current_time()` when you start the rep and again when you finish, and log the difference.
 
 `content_markdown` is the whole entry body, written by Claude — start its headings at `###` and don't put a bare `---` rule inside it, since `##` and `---` are what separate one drill from the next. `gaps` is a semicolon-separated list in the same vocabulary as `log_session`, and feeds the same weak-area counts that `get_progress_summary` reports. Passing `problem_id` also counts the drill as an attempt on that problem in the tracker — including refreshing its "last practiced" date, so a drill postpones that problem's next revision — but never unlinks a doc `save_practice_doc` wrote for it.
 
