@@ -21,6 +21,13 @@ env var, defaulting to INTERVIEW_PREP_DIR/docs/<type> if unset) -- so they can
 each point at an existing personal repo instead of living inside
 INTERVIEW_PREP_DIR:
   HLD_SOLUTIONS_DIR/<id>.md       One markdown file per HLD problem.
+  HLD_SOLUTIONS_DIR/Mock Solutions/<date>-<id>/
+                                  The HLD mock loop: reference.md (written and
+                                  frozen BEFORE the problem is posed),
+                                  attempt.md (what the candidate actually
+                                  produced), diff.md and evaluation.md. One
+                                  folder per attempt, so a re-attempt never
+                                  lands on the earlier evidence.
   LLD_SOLUTIONS_DIR/<category>/<problem>.py
                                   The LLD reference corpus: one self-contained
                                   .py design per problem, grouped by category
@@ -75,6 +82,22 @@ LLD mock-interview loop (the user attempts a problem, Claude grades it):
                                      what fits in the interview's time box
 The rubric vocabulary is fixed (LLD_RUBRIC) so scores aggregate across
 sessions -- that aggregate is what step 1 reads, closing the loop.
+
+HLD mock-interview loop (Claude interviews, then grades against a reference
+it committed to before the candidate spoke):
+  1. get_hld_feedback()            -- which of the seven dimensions are weakest
+  2. get_catalog("HLD")            -- pick a problem that forces them
+  3. start_hld_mock_attempt(...)   -- freeze the reference BEFORE posing the
+                                      problem; it can't be rewritten after
+  4. ... run the interview ...
+  5. save_hld_attempt(...)         -- the candidate's design, raw turns first
+  6. save_hld_diff(...)            -- matched / missed invariants / diverged at
+                                      choice points, flows as well as boxes
+  7. save_hld_evaluation(...)      -- score it; this also logs the session
+  8. save_practice_doc(...)        -- the clean revision artifact
+The attempt folder holds the evidence, ungroomed; the practice doc holds the
+correct design. Keeping them apart is the point -- an attempt rewritten to the
+right answer is useless for revision six weeks later.
 
 LLD drills (short focused reps, no rubric, no per-problem folder):
   1. get_lld_drill_log()   -- what was drilled recently, what's unresolved
@@ -185,6 +208,43 @@ LLD_RUBRIC = [
     "tradeoff-communication",
 ]
 LLD_RUBRIC_PREFIX = "lld:"
+
+# --- HLD: mock-attempt folders (the pre-committed reference + the diff) ------
+# HLD mirrors the LLD mock loop, but the artifact is markdown rather than code
+# and the folder is per-ATTEMPT rather than per-problem: one dated folder holds
+# reference.md (written and frozen BEFORE the problem is posed), attempt.md
+# (what the candidate actually produced), diff.md and evaluation.md. Excluded
+# from list_practice_docs the same way the LLD one is -- an attempt is evidence
+# of what happened under time pressure, not revision material.
+HLD_MOCK_DIRNAME = "Mock Solutions"
+HLD_MOCK_DIR = HLD_SOLUTIONS_DIR / HLD_MOCK_DIRNAME
+# The only filenames these tools will read or write inside an attempt folder.
+# read_hld_mock_file uses this as its whitelist, so a caller-supplied filename
+# can never name anything else.
+HLD_MOCK_FILES = ("reference.md", "attempt.md", "diff.md", "evaluation.md")
+
+# The seven-dimension HLD scorecard, matching the hld-interviewer skill. Fixed
+# for the same reason LLD_RUBRIC is: free-form keys never aggregate, and the
+# aggregate (get_hld_feedback) is what makes the next session target the weak
+# dimensions instead of picking blind. Stored under an "hld:" prefix so they
+# share index["competency_scores"] with the LLD rubric without colliding --
+# "requirements" here and "requirements-and-scope" there are different scales.
+HLD_RUBRIC = [
+    "requirements",
+    "capacity-estimation",
+    "architecture",
+    "deep-dives",
+    "scale-calibration",
+    "communication",
+    "composure",
+]
+HLD_RUBRIC_PREFIX = "hld:"
+
+# Every HLD design document must narrate how a request actually moves through
+# the system, not just which boxes exist. A component diagram shows what
+# exists; this section shows what happens. Its absence is warned about (never
+# blocked) when a doc or a reference is written.
+FLOWS_HEADING = "## End-to-end flows"
 
 VALID_TYPES = {"HLD", "LLD", "DSA", "Behavioral", "Other"}
 CATALOG_TYPES = {"DSA", "HLD", "LLD", "Behavioral"}
@@ -602,32 +662,108 @@ def _ensure_drill_log() -> None:
         )
 
 
-def _rubric_scores() -> dict:
-    """The LLD rubric slice of index["competency_scores"], keys un-prefixed."""
+def _rubric_scores(prefix: str = LLD_RUBRIC_PREFIX) -> dict:
+    """One rubric's slice of index["competency_scores"], keys un-prefixed. The
+    LLD and HLD rubrics share that dict under different prefixes, so every
+    reader here is scoped by prefix; the defaults keep the LLD callers reading
+    the LLD rubric."""
     scores = _load_index().get("competency_scores", {})
-    return {
-        k[len(LLD_RUBRIC_PREFIX):]: v
-        for k, v in scores.items()
-        if k.startswith(LLD_RUBRIC_PREFIX)
-    }
+    return {k[len(prefix):]: v for k, v in scores.items() if k.startswith(prefix)}
 
 
-def _rated_dimensions() -> List[tuple]:
+def _rated_dimensions(prefix: str = LLD_RUBRIC_PREFIX) -> List[tuple]:
     """(dimension, avg, count) for every scored rubric dimension, worst first."""
-    rated = [(k, v["avg"], v["count"]) for k, v in _rubric_scores().items() if v.get("count")]
+    rated = [(k, v["avg"], v["count"]) for k, v in _rubric_scores(prefix).items() if v.get("count")]
     rated.sort(key=lambda kv: kv[1])
     return rated
 
 
-def _unrated_dimensions() -> List[str]:
+def _unrated_dimensions(rubric: List[str] = LLD_RUBRIC, prefix: str = LLD_RUBRIC_PREFIX) -> List[str]:
     """Rubric dimensions no attempt has exercised yet."""
-    scored = _rubric_scores()
-    return [d for d in LLD_RUBRIC if d not in scored]
+    scored = _rubric_scores(prefix)
+    return [d for d in rubric if d not in scored]
 
 
-def _weakest_dimensions(limit: int = 3) -> List[tuple]:
+def _weakest_dimensions(limit: int = 3, prefix: str = LLD_RUBRIC_PREFIX) -> List[tuple]:
     """The lowest-scoring rubric dimensions — what the next mock should target."""
-    return _rated_dimensions()[:limit]
+    return _rated_dimensions(prefix)[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Helpers: HLD mock-attempt folders
+# ---------------------------------------------------------------------------
+
+def _hld_attempt_folder(problem_id: str, round_no: int = 1) -> Path:
+    """Mock Solutions/<YYYY-MM-DD>-<slug>[-r<n>]/ -- one folder per ATTEMPT, so
+    re-attempting the same problem later never lands on the earlier evidence.
+    The slug always goes through _slugify, so a problem_id like "../../etc"
+    can't escape the mock directory."""
+    suffix = "" if round_no <= 1 else f"-r{round_no}"
+    return HLD_MOCK_DIR / f"{date.today().isoformat()}-{_slugify(problem_id)}{suffix}"
+
+
+def _resolve_hld_folder(attempt_folder: str) -> "Path | None":
+    """Resolve a caller-supplied attempt folder -- either a bare folder name as
+    returned by start_hld_mock_attempt, or its absolute path -- to a path
+    inside HLD_MOCK_DIR. None if it points anywhere else, which is what stops
+    "../../.ssh" or an absolute path elsewhere on disk being read or written
+    through these tools. Returns the path whether or not it exists; callers
+    check that themselves so they can say which file is missing."""
+    raw = Path(attempt_folder.strip()).expanduser()
+    candidate = raw if raw.is_absolute() else HLD_MOCK_DIR / raw
+    try:
+        resolved = candidate.resolve()
+        root = HLD_MOCK_DIR.resolve()
+    except OSError:
+        return None
+    # The mock root itself is not an attempt folder.
+    if resolved == root or not resolved.is_relative_to(root):
+        return None
+    return resolved
+
+
+def _hld_folder_meta(folder: Path) -> dict:
+    """Everything derivable about one attempt folder: the date, problem id and
+    round encoded in its name, plus title/variant_of read back out of
+    reference.md's frontmatter. Used by the evaluation and listing tools so the
+    folder name stays the single source of truth for what an attempt is about."""
+    name = folder.name
+    stamp, rest = name[:10], name[11:]   # "YYYY-MM-DD" + "-" + the rest
+    round_no = 1
+    match = re.search(r"-r(\d+)$", rest)
+    if match:
+        round_no = int(match.group(1))
+        rest = rest[: match.start()]
+    meta = {"folder": name, "date": stamp, "problem_id": rest, "round": round_no,
+            "title": "", "variant_of": ""}
+
+    reference = folder / "reference.md"
+    if reference.exists():
+        try:
+            head = reference.read_text(encoding="utf-8", errors="ignore")[:1200]
+        except OSError:
+            head = ""
+        for line in head.splitlines():
+            for key in ("title", "variant_of"):
+                if line.startswith(f"{key}: "):
+                    meta[key] = line[len(key) + 2:].strip()
+    return meta
+
+
+def _flows_warning(markdown: str, what: str) -> str:
+    """A warning (never an error) when a design document doesn't narrate its
+    end-to-end flows. The write always succeeds -- the point is to catch the
+    doc that shows what exists but never what happens, at the moment it's
+    written rather than six weeks later during revision."""
+    if FLOWS_HEADING.lower() in markdown.lower():
+        return ""
+    return (
+        f"\n\nWARNING: {what} has no `{FLOWS_HEADING}` section. Add one after "
+        "the architecture diagram and before the deep dives, with at least "
+        "three numbered flows (the write path, the primary read-or-execute "
+        "path, and a failure/recovery path). Each step should name the "
+        "component, the operation and the datastore it touches."
+    )
 
 
 def _mock_history_rows(records: List[dict], limit: int = 0) -> List[tuple]:
@@ -730,21 +866,29 @@ def get_progress_summary() -> str:
         due = sum(1 for info in tracker.values() if _days_since(info["last_practiced"]) >= STALE_DAYS)
         lines.append(f"- {t}: {attempted}/{total} catalog problems attempted, {due} due for revision")
 
-    # Behavioral competencies and LLD rubric dimensions share this dict but are
+    # Behavioral competencies and the two mock rubrics share this dict but are
     # different scales measuring different things, so they're reported apart --
-    # LLD keys carry the LLD_RUBRIC_PREFIX (see save_mock_evaluation).
+    # the rubric keys carry LLD_RUBRIC_PREFIX / HLD_RUBRIC_PREFIX (see
+    # save_mock_evaluation / save_hld_evaluation). Anything unprefixed is
+    # behavioral, so a new rubric must be excluded here as well as reported
+    # below, or its scores show up as behavioral competencies.
     competency_scores = index.get("competency_scores", {})
-    behavioral = {k: v for k, v in competency_scores.items() if not k.startswith(LLD_RUBRIC_PREFIX)}
+    rubric_prefixes = (LLD_RUBRIC_PREFIX, HLD_RUBRIC_PREFIX)
+    behavioral = {k: v for k, v in competency_scores.items() if not k.startswith(rubric_prefixes)}
     if behavioral:
         lines += ["", "Competency scores (behavioral, 1-5 avg):"]
         for area, stats in sorted(behavioral.items(), key=lambda kv: kv[1]["avg"]):
             lines.append(f"- {area}: {stats['avg']:.1f} ({stats['count']} rated)")
 
-    rated = _rated_dimensions()
-    if rated:
-        lines += ["", "LLD mock rubric (1-5 avg, weakest first):"]
-        lines += [f"- {dim}: {avg:.1f} ({n} rated)" for dim, avg, n in rated]
-        lines.append("Call get_lld_feedback before an LLD session for the full scorecard.")
+    for label, prefix, tool in (
+        ("LLD", LLD_RUBRIC_PREFIX, "get_lld_feedback"),
+        ("HLD", HLD_RUBRIC_PREFIX, "get_hld_feedback"),
+    ):
+        rated = _rated_dimensions(prefix)
+        if rated:
+            lines += ["", f"{label} mock rubric (1-5 avg, weakest first):"]
+            lines += [f"- {dim}: {avg:.1f} ({n} rated)" for dim, avg, n in rated]
+            lines.append(f"Call {tool} before an {label} session for the full scorecard.")
 
     return "\n".join(lines)
 
@@ -1136,9 +1280,16 @@ def save_practice_doc(problem_type: str, title: str, content_markdown: str, prob
     Write the ENTIRE content yourself in content_markdown — this tool only
     persists it, it doesn't generate anything. Suggested shape per type:
       - HLD: requirements (functional/non-functional), capacity estimation,
-        high-level architecture (components as text/ASCII diagram), API
-        design, data model, deep dives on the hard parts, trade-offs, what
-        you'd change under different constraints.
+        high-level architecture (components as text/ASCII diagram), an
+        `## End-to-end flows` section, API design, data model, deep dives on
+        the hard parts, trade-offs, what you'd change under different
+        constraints. The flows section is required and comes immediately
+        after the architecture diagram: at least three numbered, sequential
+        flows -- the write path, the primary read-or-execute path, and a
+        failure/recovery path -- each step naming the component, the
+        operation and the datastore touched ("sweeper runs `SELECT ... FOR
+        UPDATE SKIP LOCKED` on `job_runs`", not "sweeper picks up jobs"). A
+        diagram shows what exists; this shows what happens.
       - LLD: problem framing, key entities/classes with responsibilities,
         class diagram (as text), design patterns used and why, key design
         decisions and trade-offs, extensibility notes.
@@ -1197,7 +1348,11 @@ def save_practice_doc(problem_type: str, title: str, content_markdown: str, prob
         }
     _save_index(index)
 
-    return f"Saved {problem_type} doc for `{slug}` to {path}."
+    # HLD docs are the revision artifact, so they must narrate what happens,
+    # not just what exists. Warned about rather than blocked: the doc is worth
+    # keeping either way, and refusing the write would lose it.
+    warning = _flows_warning(content_markdown, "this HLD doc") if problem_type == "HLD" else ""
+    return f"Saved {problem_type} doc for `{slug}` to {path}." + warning
 
 
 @mcp.tool()
@@ -2295,6 +2450,563 @@ def get_lld_drill_log(limit: int = 5) -> str:
     if len(shown) < len(entries):
         heading += f" — showing the most recent {len(shown)}"
     return heading + ".\n\n" + LLD_DRILL_SEPARATOR.join(shown).strip()
+
+
+# ---------------------------------------------------------------------------
+# Tools: the HLD mock loop (pre-committed reference -> attempt -> diff -> score)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def start_hld_mock_attempt(
+    problem_id: str,
+    title: str,
+    reference_markdown: str,
+    variant_of: str = "",
+    difficulty: str = "",
+    round_no: int = 1,
+) -> str:
+    """Freeze your grading reference BEFORE posing an HLD problem. Creates
+    "Mock Solutions/<date>-<problem-id>/" under the HLD root and writes
+    reference.md into it, stamped with the server's own clock.
+
+    Call this at the START of a mock HLD interview, after generating the
+    reference and BEFORE giving the candidate the prompt. That ordering is the
+    entire point: a reference that still lives only in your context can drift
+    under candidate pushback, and a reference you can revise mid-session isn't
+    a reference. Once this returns, it is on disk and this tool will not
+    rewrite it.
+
+    Structure reference_markdown as the hld-interviewer skill specifies —
+    invariants, choice points, scale verdict, the delta table for variants —
+    and include a `## End-to-end flows` section, since save_hld_diff compares
+    flows and not just which components got named.
+
+    Refuses to overwrite an existing reference.md. To attempt the same problem
+    again on the same day, pass round_no=2 (folder suffix "-r2"), which is a
+    new attempt rather than a rewritten reference.
+
+    Args:
+        problem_id: Catalog id (see get_catalog) or a slug for a custom
+            problem. For a variant, use the variant's own id, not the
+            canonical's.
+        title: Problem title as posed, e.g. "Design a Distributed Task Scheduler".
+        reference_markdown: The full frozen reference, authored entirely by
+            you before the candidate has said anything about the design.
+        variant_of: Canonical problem_id this is a variant of, if any.
+        difficulty: Optional Easy/Medium/Hard.
+        round_no: 2, 3, ... to open another attempt at the same problem on the
+            same day. Default 1.
+
+    Returns the attempt folder path — pass it to save_hld_attempt,
+    save_hld_diff and save_hld_evaluation for the rest of the session.
+    """
+    slug = _slugify(problem_id) if problem_id.strip() else _slugify(title)
+    if not slug:
+        return "problem_id/title produced an empty id — give the problem a name."
+    if not reference_markdown.strip():
+        return "reference_markdown is empty — the reference is the pre-commitment."
+
+    folder = _hld_attempt_folder(slug, round_no)
+    if not _resolve_hld_folder(str(folder)):
+        return f"Refusing to write outside {HLD_MOCK_DIR}."
+
+    reference = folder / "reference.md"
+    if reference.exists():
+        return (
+            f"{reference} already exists — refusing to overwrite a frozen "
+            "reference. The pre-commitment only binds if it can't be rewritten "
+            "after the candidate has spoken. If this is genuinely a new "
+            f"attempt at `{slug}`, call again with round_no=2 (or the next "
+            f"free number) to open a separate folder alongside {folder.name}."
+        )
+
+    folder.mkdir(parents=True, exist_ok=True)
+    front = ["---", f"problem_id: {slug}", f"title: {title.strip()}"]
+    if variant_of.strip():
+        front.append(f"variant_of: {_slugify(variant_of)}")
+    if difficulty.strip():
+        front.append(f"difficulty: {difficulty.strip()}")
+    # The server's own clock, never a tool argument: a reference whose
+    # written_at could be supplied by the caller could be backdated, and a
+    # backdated pre-commitment is not a pre-commitment.
+    front += [f"written_at: {_now().strftime('%Y-%m-%dT%H:%M:%S')}", "frozen: true", "---", ""]
+    reference.write_text(
+        "\n".join(front) + f"\n# {title.strip()} — reference (frozen)\n\n"
+        + reference_markdown.strip() + "\n",
+        encoding="utf-8",
+    )
+
+    return (
+        f"Reference frozen for `{slug}` (round {round_no}).\n"
+        f"- Attempt folder: {folder}\n"
+        f"- Reference: {reference}\n\n"
+        "Now pose the problem. At the end of the session: save_hld_attempt → "
+        "save_hld_diff → save_hld_evaluation → save_practice_doc."
+        + _flows_warning(reference_markdown, "reference.md")
+    )
+
+
+@mcp.tool()
+def save_hld_attempt(attempt_folder: str, attempt_markdown: str, raw_turns: str = "") -> str:
+    """Capture what the candidate ACTUALLY designed, as attempt.md inside the
+    attempt folder start_hld_mock_attempt created. Call this at the end of the
+    interview, before save_hld_diff.
+
+    raw_turns matters more than attempt_markdown. Pass the candidate's design
+    turns close to verbatim. Authoring this from memory instead unconsciously
+    tidies the reasoning — filling in a justification they never gave,
+    straightening out an explanation that doubled back — and that silently
+    destroys the diff, which is the only reason the attempt is saved
+    separately at all.
+
+    This tool writes the "As stated by the candidate" section from raw_turns
+    and then your attempt_markdown, which must supply the other two sections:
+
+      ## Interviewer's structured rendering
+      The same design normalised into the standard section shape, so it can be
+      compared mechanically against the reference.
+
+      ## Arrived-at-only-after-prompting
+      Every conclusion the candidate reached AFTER you named the gap, with the
+      prompting question quoted. Keep this a first-class list rather than a
+      remark buried in prose — the distinction between "said it" and "said it
+      once asked" is load-bearing in this candidate's feedback.
+
+    The attempt is a record of what was produced under time pressure. Do not
+    correct it toward the reference; correct material belongs in reference.md
+    and in the practice doc.
+
+    Args:
+        attempt_folder: The folder returned by start_hld_mock_attempt (name or
+            full path).
+        attempt_markdown: The structured rendering plus the
+            arrived-at-only-after-prompting list, authored by you.
+        raw_turns: The candidate's own words, lightly cleaned for
+            transcription noise only.
+    """
+    folder = _resolve_hld_folder(attempt_folder)
+    if not folder:
+        return f"attempt_folder must name a folder inside {HLD_MOCK_DIR}."
+    if not folder.is_dir():
+        return (
+            f"No attempt folder at {folder}. Use list_hld_mock_attempts to see "
+            "what exists, or start_hld_mock_attempt to open one."
+        )
+    if not attempt_markdown.strip():
+        return "attempt_markdown is empty — nothing to save."
+
+    meta = _hld_folder_meta(folder)
+    display_title = meta["title"] or meta["problem_id"]
+    path = folder / "attempt.md"
+    today = date.today().isoformat()
+
+    stated = raw_turns.strip() or (
+        "_(not captured — the interviewer did not pass raw_turns, so this "
+        "attempt has no verbatim record and the diff below rests on a "
+        "reconstruction.)_"
+    )
+    path.write_text(
+        f"# {display_title} — candidate attempt\n\n"
+        f"_Saved: {today} · id: `{meta['problem_id']}` · folder: `{folder.name}`_\n\n"
+        "---\n\n"
+        "## As stated by the candidate\n\n"
+        "_Transcribed from the session, lightly cleaned. No reasoning added._\n\n"
+        f"{stated}\n\n"
+        "---\n\n"
+        + attempt_markdown.strip() + "\n",
+        encoding="utf-8",
+    )
+
+    warnings = []
+    if not raw_turns.strip():
+        warnings.append(
+            "raw_turns was empty, so there is no verbatim record of what the "
+            "candidate said — the diff is now grading a reconstruction."
+        )
+    for heading in ("## Interviewer's structured rendering", "## Arrived-at-only-after-prompting"):
+        if heading.lower() not in attempt_markdown.lower():
+            warnings.append(f"attempt_markdown has no `{heading}` section.")
+
+    out = f"Attempt saved to {path}.\nNext: save_hld_diff against the frozen reference."
+    if warnings:
+        out += "\n\nWARNING: " + " ".join(warnings)
+    return out
+
+
+@mcp.tool()
+def save_hld_diff(
+    attempt_folder: str,
+    matched: str,
+    missed: str,
+    diverged: str,
+    diff_markdown: str,
+) -> str:
+    """Compare the candidate's attempt against the frozen reference, as
+    diff.md. Call this after save_hld_attempt and before save_hld_evaluation —
+    the diff is what the scores are then justified by.
+
+    Three buckets, and the distinction between the last two is the whole point:
+      matched  — present in both reference and attempt.
+      missed   — a reference INVARIANT absent from the attempt. A real gap.
+      diverged — the attempt took a different option at a CHOICE POINT. Not a
+                 gap if the trade-off reasoning was sound; record the reasoning
+                 they actually gave, so this can be re-read later.
+
+    diff_markdown should carry a per-section table AND, separately, a
+    flow-level diff comparing the end-to-end traces. Two designs can list
+    identical boxes and still route a request completely differently — a
+    component-level diff alone would call that a match.
+
+    Errors if reference.md or attempt.md is missing: a diff with only one side
+    is meaningless.
+
+    Args:
+        attempt_folder: The folder returned by start_hld_mock_attempt.
+        matched: Semicolon-separated list.
+        missed: Semicolon-separated list of missed invariants.
+        diverged: Semicolon-separated list of choice-point deviations.
+        diff_markdown: The full written comparison, authored by you.
+    """
+    folder = _resolve_hld_folder(attempt_folder)
+    if not folder:
+        return f"attempt_folder must name a folder inside {HLD_MOCK_DIR}."
+    for required in ("reference.md", "attempt.md"):
+        if not (folder / required).exists():
+            return (
+                f"No {required} in {folder} — a diff needs both sides to mean "
+                "anything. Run start_hld_mock_attempt / save_hld_attempt first."
+            )
+
+    meta = _hld_folder_meta(folder)
+    buckets = {
+        name: [x.strip() for x in raw.split(";") if x.strip()]
+        for name, raw in (("matched", matched), ("missed", missed), ("diverged", diverged))
+    }
+
+    lines = [
+        f"# {meta['title'] or meta['problem_id']} — reference vs. attempt",
+        "",
+        f"_Diffed: {date.today().isoformat()} · id: `{meta['problem_id']}` · folder: `{folder.name}`_",
+        "",
+        *_markdown_table(
+            ["Bucket", "Count", "Meaning"],
+            [
+                ("matched", len(buckets["matched"]), "in both reference and attempt"),
+                ("missed", len(buckets["missed"]), "**reference invariant absent from the attempt — a real gap**"),
+                ("diverged", len(buckets["diverged"]), "different option at a choice point — not a gap if the reasoning held"),
+            ],
+        ),
+        "",
+    ]
+    for name, heading in (
+        ("matched", "## Matched"),
+        ("missed", "## Missed invariants"),
+        ("diverged", "## Diverged at choice points"),
+    ):
+        lines += [heading, ""]
+        lines += [f"- {item}" for item in buckets[name]] or ["- (none)"]
+        lines += [""]
+    lines += ["---", "", diff_markdown.strip(), ""]
+
+    path = folder / "diff.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    out = (
+        f"Diff saved to {path} "
+        f"({len(buckets['matched'])} matched, {len(buckets['missed'])} missed, "
+        f"{len(buckets['diverged'])} diverged).\n"
+        "Next: save_hld_evaluation."
+    )
+    if "flow" not in diff_markdown.lower():
+        out += (
+            "\n\nWARNING: diff_markdown never mentions flows. Add a flow-level "
+            "diff comparing the end-to-end traces — identical component lists "
+            "can still route a request completely differently."
+        )
+    return out
+
+
+@mcp.tool()
+def save_hld_evaluation(
+    attempt_folder: str,
+    verdict: str,
+    level_verdict: str,
+    rubric_scores: dict,
+    strengths: str,
+    gaps: str,
+    evaluation_markdown: str,
+    persona: str = "",
+) -> str:
+    """Score an HLD mock as the interviewer. Writes evaluation.md into the
+    attempt folder, records the rubric scores so they aggregate across
+    sessions, and logs the session — so this REPLACES a separate log_session
+    call for HLD mocks.
+
+    Call it last in the mock sequence, after save_hld_diff, so the scores are
+    justified by a written diff rather than by end-of-session recall. Score
+    honestly against the bar: inflated scores make the whole loop useless,
+    since these averages are what get_hld_feedback feeds into the next
+    session's problem choice.
+
+    rubric_scores keys MUST come from this fixed list (1-5 each; omit a
+    dimension the session didn't exercise):
+      requirements        — functional/non-functional, what they pinned down
+      capacity-estimation — did they justify the numbers themselves
+      architecture        — component design, and whether each box is warranted
+      deep-dives          — depth on the hard parts under drilling
+      scale-calibration   — read the stated numbers vs. pattern-matched to FAANG
+      communication       — structure, signposting, driving the session
+      composure           — behaviour under pushback and persona pressure
+    Free-form keys are rejected: the aggregate is the whole value, and keys
+    that vary per session never aggregate.
+
+    Args:
+        attempt_folder: The folder returned by start_hld_mock_attempt.
+        verdict: One of Strong Hire, Hire, Lean Hire, Lean No Hire, No Hire.
+        level_verdict: The verdict at level, e.g. "Hire@Senior, No-hire@Staff".
+        rubric_scores: dict of dimension -> integer 1-5, keys from the list above.
+        strengths: Semicolon-separated list of what they did well.
+        gaps: Semicolon-separated short weak-area tags. Prefer reusing rubric
+            dimension names so they aggregate with the scores.
+        evaluation_markdown: Your full written critique, authored by you.
+        persona: The interviewer persona used this session, revealed at the end
+            (standard / adversarial / silent / derailer).
+    """
+    folder = _resolve_hld_folder(attempt_folder)
+    if not folder:
+        return f"attempt_folder must name a folder inside {HLD_MOCK_DIR}."
+    if not folder.is_dir():
+        return f"No attempt folder at {folder}. Use list_hld_mock_attempts to see what exists."
+
+    verdict = verdict.strip()
+    if verdict not in VALID_VERDICTS:
+        return f"Invalid verdict '{verdict}'. Use one of: {sorted(VALID_VERDICTS)}"
+
+    unknown = [k for k in rubric_scores if k.strip().lower() not in HLD_RUBRIC]
+    if unknown:
+        return (
+            f"Unknown rubric dimension(s): {unknown}. Scores only aggregate if "
+            f"keys come from the fixed vocabulary: {HLD_RUBRIC}"
+        )
+    if not rubric_scores:
+        return f"rubric_scores is empty — score at least one dimension from {HLD_RUBRIC}."
+    clean_scores = {}
+    for area, score in rubric_scores.items():
+        if not isinstance(score, int) or not (MIN_COMPETENCY_SCORE <= score <= MAX_COMPETENCY_SCORE):
+            return (
+                f"Invalid score for '{area}': {score!r}. Scores must be "
+                f"integers {MIN_COMPETENCY_SCORE}-{MAX_COMPETENCY_SCORE}."
+            )
+        clean_scores[area.strip().lower()] = score
+
+    meta = _hld_folder_meta(folder)
+    slug = meta["problem_id"]
+    catalog_entry = {c["id"]: c for c in _load_catalog()["HLD"]}.get(slug)
+    display_title = meta["title"] or (catalog_entry["title"] if catalog_entry else slug)
+    today = date.today().isoformat()
+    average = sum(clean_scores.values()) / len(clean_scores)
+
+    # Rendered in HLD_RUBRIC order (not dict order) so every evaluation.md
+    # reads the same way regardless of how the scores were passed in.
+    score_table = _markdown_table(
+        ["Dimension", "Score"],
+        [(dim, f"{clean_scores[dim]}/5") for dim in HLD_RUBRIC if dim in clean_scores]
+        + [("**average**", f"**{average:.1f}/5**")],
+    )
+
+    path = folder / "evaluation.md"
+    header = (
+        f"# {display_title} — evaluation\n\n"
+        f"_Graded: {today} · Type: HLD · id: `{slug}` · verdict: **{verdict}**_\n\n"
+        f"**At level:** {level_verdict.strip() or '(not stated)'}\n\n"
+    )
+    if persona.strip():
+        header += f"**Interviewer persona:** {persona.strip()}\n\n"
+    path.write_text(
+        header + "\n".join(score_table) + "\n\n---\n\n" + evaluation_markdown.strip() + "\n",
+        encoding="utf-8",
+    )
+
+    # Rubric scores go through log_session's competency machinery under an
+    # "hld:" prefix, so they aggregate exactly like the LLD rubric without
+    # sharing its namespace. log_session also appends to revision.md and
+    # updates weak_areas + the per-problem tracker -- and it preserves any
+    # doc_path already recorded, which is what keeps this attempt folder out
+    # of list_practice_docs. Nothing here ever points a tracker doc_path at
+    # Mock Solutions/: the practice doc stays the revision artifact.
+    log_result = log_session(
+        topic=display_title,
+        interview_type="HLD",
+        verdict=verdict,
+        strengths=strengths,
+        gaps=gaps,
+        notes=(
+            f"HLD mock attempt in {folder.name}"
+            + (f" (persona: {persona.strip()})" if persona.strip() else "")
+            + f". At level: {level_verdict.strip()}. Evaluation: {path}."
+        ),
+        problem_id=slug,
+        competency_scores={f"{HLD_RUBRIC_PREFIX}{k}": v for k, v in clean_scores.items()},
+    )
+
+    index = _load_index()
+    index.setdefault("hld_mock", []).append({
+        "problem_id": slug,
+        "title": display_title,
+        "round": meta["round"],
+        "date": today,
+        "verdict": verdict,
+        "level_verdict": level_verdict.strip(),
+        "persona": persona.strip(),
+        "scores": clean_scores,
+        "average": average,
+        "folder": folder.name,
+        "folder_path": str(folder),
+    })
+    _save_index(index)
+
+    weakest = _weakest_dimensions(prefix=HLD_RUBRIC_PREFIX)
+    weak_note = (
+        " Weakest dimensions now: "
+        + ", ".join(f"{d} ({avg:.1f})" for d, avg, _ in weakest)
+        + "."
+    ) if weakest else ""
+
+    return (
+        f"Evaluation saved to {path} (average {average:.1f}/5, verdict {verdict}"
+        + (f", {level_verdict.strip()}" if level_verdict.strip() else "")
+        + f").\n{log_result}{weak_note}\n"
+        "Next: save_practice_doc for the clean revision artifact — the attempt "
+        "folder keeps the evidence, warts intact."
+    )
+
+
+@mcp.tool()
+def list_hld_mock_attempts(problem_id: str = "") -> str:
+    """List the HLD mock attempt folders under "Mock Solutions/": for each,
+    which of the four files exist (reference / attempt / diff / evaluation),
+    and the verdict if it's been graded.
+
+    Call this at the start of an HLD session to avoid re-posing a problem the
+    candidate has already attempted, and to spot attempts left incomplete
+    (a reference with no attempt, an attempt never graded). Use
+    read_hld_mock_file to open any listed file.
+
+    Args:
+        problem_id: Optional — limit to one problem's attempts.
+    """
+    if not HLD_MOCK_DIR.exists():
+        return (
+            f"No HLD mock attempts yet — {HLD_MOCK_DIR} doesn't exist. "
+            "Use start_hld_mock_attempt to freeze the first reference."
+        )
+
+    graded = {rec.get("folder"): rec for rec in _load_index().get("hld_mock", [])}
+    folders = sorted(p for p in HLD_MOCK_DIR.iterdir() if p.is_dir() and not p.name.startswith("."))
+    if problem_id.strip():
+        slug = _slugify(problem_id)
+        folders = [f for f in folders if _hld_folder_meta(f)["problem_id"] == slug]
+        if not folders:
+            return f"No HLD mock attempts for `{slug}` under {HLD_MOCK_DIR}."
+    if not folders:
+        return f"No HLD mock attempts found under {HLD_MOCK_DIR}. Use start_hld_mock_attempt to open one."
+
+    rows = []
+    incomplete = []
+    for folder in folders:
+        meta = _hld_folder_meta(folder)
+        rec = graded.get(folder.name)
+        present = {f: (folder / f).exists() for f in HLD_MOCK_FILES}
+        rows.append((
+            f"`{folder.name}`",
+            f"`{meta['problem_id']}`",
+            meta["date"],
+            *("yes" if present[f] else "—" for f in HLD_MOCK_FILES),
+            rec["verdict"] if rec else "not graded",
+        ))
+        if not all(present.values()):
+            missing = [f for f in HLD_MOCK_FILES if not present[f]]
+            incomplete.append(f"{folder.name} (missing {', '.join(missing)})")
+
+    out = [f"HLD mock attempts under {HLD_MOCK_DIR}:", ""]
+    out += _markdown_table(
+        ["Folder", "Problem", "Date", "Reference", "Attempt", "Diff", "Evaluation", "Verdict"],
+        rows,
+    )
+    if incomplete:
+        out += ["", "Incomplete: " + "; ".join(incomplete)]
+    return "\n".join(out)
+
+
+@mcp.tool()
+def read_hld_mock_file(attempt_folder: str, filename: str) -> str:
+    """Read one file from an HLD mock attempt folder in full — e.g. to re-read
+    the frozen reference before writing the diff, or to pull up a past
+    attempt's evaluation before a re-attempt.
+
+    Args:
+        attempt_folder: The folder name (or path) from list_hld_mock_attempts.
+        filename: One of reference.md, attempt.md, diff.md, evaluation.md.
+    """
+    if filename.strip() not in HLD_MOCK_FILES:
+        return f"filename must be one of {list(HLD_MOCK_FILES)}."
+    folder = _resolve_hld_folder(attempt_folder)
+    if not folder:
+        return f"attempt_folder must name a folder inside {HLD_MOCK_DIR}."
+    path = folder / filename.strip()
+    if not path.exists():
+        return f"No {filename.strip()} in {folder}. Use list_hld_mock_attempts to see which files exist."
+    return path.read_text(encoding="utf-8")
+
+
+@mcp.tool()
+def get_hld_feedback() -> str:
+    """Summarize how the user is performing across HLD mock interviews: rubric
+    averages per dimension, the weakest dimensions, and recent verdict history.
+
+    Call this at the START of an HLD session, alongside get_catalog, and let it
+    drive the session: pick a problem that forces the weakest dimensions, and
+    push hardest on them during the interview. Reading it afterwards records
+    scores; reading it beforehand is what makes the loop tune itself.
+    """
+    records = _load_index().get("hld_mock", [])
+    if not records:
+        return (
+            "No HLD mock evaluations recorded yet. Use start_hld_mock_attempt "
+            "to freeze a reference, then save_hld_attempt / save_hld_diff / "
+            "save_hld_evaluation once the session is done — the rubric "
+            "averages build up from there."
+        )
+
+    lines = [
+        f"{len(records)} HLD mock attempt(s) evaluated.",
+        "",
+        "Rubric averages (1-5):",
+        *(f"- {d}: {avg:.1f} ({n} rated)" for d, avg, n in _rated_dimensions(HLD_RUBRIC_PREFIX)),
+    ]
+    unrated = _unrated_dimensions(HLD_RUBRIC, HLD_RUBRIC_PREFIX)
+    if unrated:
+        lines.append(f"- not yet exercised: {', '.join(unrated)}")
+
+    weakest = _weakest_dimensions(prefix=HLD_RUBRIC_PREFIX)
+    if weakest:
+        lines += [
+            "",
+            "Weakest dimensions — bias the next problem toward these, and "
+            "probe them hard during the interview:",
+            *(f"- {d} ({avg:.1f}/5 over {n} attempt(s))" for d, avg, n in weakest),
+        ]
+
+    lines += ["", "Recent attempts:", ""]
+    lines += _markdown_table(
+        ["Date", "Problem", "Round", "Verdict", "Average", "Weakest this round"],
+        _mock_history_rows(records, limit=10),
+    )
+    levels = [f"{r['date']} {r['problem_id']}: {r['level_verdict']}" for r in records[-5:] if r.get("level_verdict")]
+    if levels:
+        lines += ["", "Recent verdicts at level:", *(f"- {l}" for l in levels)]
+    lines += ["", f"Attempt folders: {HLD_MOCK_DIR}"]
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

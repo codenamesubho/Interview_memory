@@ -26,6 +26,9 @@ EXPECTED_TOOLS = {
     "start_mock_attempt", "list_mock_attempts", "save_mock_evaluation",
     "save_ideal_solution", "save_simple_solution", "get_lld_feedback",
     "log_lld_drill", "get_lld_drill_log", "get_current_time",
+    "start_hld_mock_attempt", "save_hld_attempt", "save_hld_diff",
+    "save_hld_evaluation", "list_hld_mock_attempts", "read_hld_mock_file",
+    "get_hld_feedback",
 }
 
 
