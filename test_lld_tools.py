@@ -1,5 +1,6 @@
 """
-Hermetic tests for the LLD corpus tools and the mock-interview loop.
+Hermetic tests for the LLD corpus tools, the mock-interview loop and the
+clock tool (get_current_time, which the drill flow leans on for durations).
 
 Builds a synthetic LLD_SOLUTIONS_DIR in a temp directory (mirroring the shape
 of a real design repo: numbered category folders, corpus-wide docs, junk) and
@@ -20,6 +21,7 @@ import importlib
 import os
 import sys
 import tempfile
+from datetime import date, datetime
 from pathlib import Path
 
 FAILS = []
@@ -335,6 +337,74 @@ def main() -> int:
     check("refuses to import an attempt",
           "not `solution`" in server.import_solved_lld_problem(
               "design-parking-lot", "Mock Solutions/design-parking-lot/attempt.py"))
+
+    # --- the drill log -----------------------------------------------------
+    drill_log = lld / "DRILL_LOG.md"
+    check("empty-state points at the drill tool", "No drill log yet" in server.get_lld_drill_log())
+    check("rejects an empty drill", "nothing to log" in server.log_lld_drill("noop", "   "))
+    check("empty drill created no file", not drill_log.exists())
+
+    weak_before = server._load_index()["weak_areas"].get("interface segregation", 0)
+    r = server.log_lld_drill(
+        "Strategy vs. State for a vending machine",
+        "### Asked\nWhen does State beat Strategy?\n\n### Verdict\nMuddled the two.",
+        duration_minutes=15,
+        gaps="interface segregation; class-decomposition",
+    )
+    check("drill log created", drill_log.exists(), r[:120])
+    check("two gaps reported", "2 gap(s)" in r, r[:120])
+    text = drill_log.read_text()
+    check("preamble written once", text.count("# LLD Drill Log") == 1)
+    check("header stamps the duration", "· 15 min" in text, text[:400])
+    check("body preserved", "When does State beat Strategy?" in text)
+    check("gaps rendered in the entry", "interface segregation, class-decomposition" in text)
+    check("gaps feed the shared weak-area tracker",
+          server._load_index()["weak_areas"]["interface segregation"] == weak_before + 1)
+
+    # A drill on a cataloged problem counts as an attempt but must NOT clobber
+    # the doc_path save_practice_doc linked earlier -- _record_practice(None).
+    doc_before = server._load_index()["problems"]["LLD"]["design-toy-cache"]["doc_path"]
+    r = server.log_lld_drill("Toy cache eviction", "### Asked\nLRU vs LFU.",
+                             problem_id="design-toy-cache")
+    cache = server._load_index()["problems"]["LLD"]["design-toy-cache"]
+    check("drill counts as an attempt", cache["times_practiced"] == 1, str(cache["times_practiced"]))
+    check("drill preserves an existing doc_path", cache["doc_path"] == doc_before, str(cache["doc_path"]))
+    check("get_practice_doc still resolves after a drill",
+          "Design a Toy Cache" in server.get_practice_doc("LLD", "design-toy-cache"))
+    check("problem id stamped in the entry", "_Problem: `design-toy-cache`_" in drill_log.read_text())
+
+    check("appends rather than overwrites", drill_log.read_text().count("\n## ") == 2)
+    full = server.get_lld_drill_log(limit=0)
+    check("reads back both drills", "2 drill(s) logged" in full, full[:120])
+    recent = server.get_lld_drill_log(limit=1)
+    check("limit returns only the newest drill",
+          "Toy cache eviction" in recent and "vending machine" not in recent, recent[:200])
+    check("limit says what it clipped", "most recent 1" in recent, recent[:120])
+    check("drill log classified as drill-log",
+          server._lld_kind(drill_log) == "drill-log", server._lld_kind(drill_log))
+    check("drill log not mistaken for a corpus index",
+          "| drill-log |" in server.scan_lld_directory())
+
+    # --- the clock ---------------------------------------------------------
+    print("\n-- get_current_time --")
+    clock = server.get_current_time()
+    local_line = next((l for l in clock.splitlines() if l.startswith("Local: ")), "")
+    stamp = local_line[len("Local: "):].split(" (")[0]
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(stamp)
+    except ValueError:
+        pass
+    check("local time parses as ISO 8601", parsed is not None, stamp)
+    check("local time is timezone-aware", parsed is not None and parsed.utcoffset() is not None, stamp)
+    # The whole point of using a local clock: it must never disagree with the
+    # date every log writer stamps, or the tool contradicts revision.md.
+    check("local date agrees with the date the log writers stamp",
+          parsed is not None and parsed.date() == date.today(), stamp)
+    check("today's date reported explicitly",
+          f"Today (as stamped in revision.md / DRILL_LOG.md): {date.today().isoformat()}" in clock, clock)
+    check("UTC and epoch reported too",
+          "UTC:   " in clock and "Epoch: " in clock, clock)
 
     print()
     if FAILS:

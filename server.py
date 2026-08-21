@@ -35,6 +35,9 @@ INTERVIEW_PREP_DIR:
                                   suffixed: attempt_2.py, ideal_2.py, etc.
                                   feedback.md at the top of Mock Solutions/ is
                                   the running rubric scorecard.
+  LLD_SOLUTIONS_DIR/DRILL_LOG.md  One running, append-only log of short LLD
+                                  drills (the LLD-drill skill) -- quick reps
+                                  that don't warrant a whole mock folder.
   DSA_SOLUTIONS_DIR/<topic>/<problem>.py
                                   One real .py file per DSA problem, grouped
                                   by topic folder, matching a typical
@@ -48,6 +51,9 @@ same convention (never overwriting without an explicit flag).
 Design goal: Claude loads a COMPACT summary at session start
 (get_progress_summary), not old transcripts or full docs. Full detail for a
 specific session or problem is fetched on demand.
+
+get_current_time() reports this machine's wall clock (local, UTC, epoch) --
+call it to time a rep or to check today's date, rather than assuming either.
 
 Typical flow:
   1. get_progress_summary()                     -- orient at the start
@@ -70,6 +76,13 @@ LLD mock-interview loop (the user attempts a problem, Claude grades it):
 The rubric vocabulary is fixed (LLD_RUBRIC) so scores aggregate across
 sessions -- that aggregate is what step 1 reads, closing the loop.
 
+LLD drills (short focused reps, no rubric, no per-problem folder):
+  1. get_lld_drill_log()   -- what was drilled recently, what's unresolved
+  2. ... run the drill with the user ...  (get_current_time at both ends
+                               gives the duration_minutes below)
+  3. log_lld_drill(...)     -- append it to DRILL_LOG.md; gaps feed the same
+                               weak-area tracker log_session writes to.
+
 One-time / occasional housekeeping:
   scan_dsa_directory() / scan_lld_directory() -> match files to catalog ids
   yourself -> import_solved_dsa_problem(s) / import_solved_lld_problem(s) to
@@ -79,7 +92,7 @@ One-time / occasional housekeeping:
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -143,6 +156,13 @@ DSA_FOLDER_MAP = {
 LLD_MOCK_DIRNAME = "Mock Solutions"
 LLD_MOCK_DIR = LLD_SOLUTIONS_DIR / LLD_MOCK_DIRNAME
 LLD_FEEDBACK_MD = LLD_MOCK_DIR / "feedback.md"
+
+# The drill log: one running, append-only file for short focused LLD drills
+# (the LLD-drill skill), as opposed to the full mock loop under Mock Solutions/.
+# Same shape as revision.md -- newest entry at the bottom, sections separated by
+# a "---" rule -- but scoped to LLD and kept beside the corpus it's about.
+LLD_DRILL_LOG_MD = LLD_SOLUTIONS_DIR / "DRILL_LOG.md"
+LLD_DRILL_SEPARATOR = "\n---\n"
 
 # Roles within one mock problem folder, and the extension each is written with.
 # "attempt" is the user's own file: no tool in this server ever writes over one.
@@ -249,6 +269,14 @@ def _ensure_revision_md() -> None:
         )
 
 
+def _now() -> datetime:
+    """The current local wall-clock time, timezone-aware. Local (not UTC) so
+    its .date() always agrees with the date.today() every log writer stamps --
+    a UTC clock would report a different day either side of midnight and make
+    get_current_time contradict revision.md."""
+    return datetime.now().astimezone()
+
+
 def _days_since(iso_date: str) -> int:
     try:
         return (date.today() - date.fromisoformat(iso_date)).days
@@ -283,7 +311,7 @@ def _tracked_doc_paths(problem_type: str) -> set:
 def _record_practice(
     problem_type: str,
     slug: str,
-    doc_path: Path,
+    doc_path: "Path | None",
     when: str,
     title: str = "",
     topic: str = "",
@@ -295,8 +323,13 @@ def _record_practice(
     caller's title/topic/difficulty, which are fallbacks for problems not in
     the catalog; a previously recorded verdict wins over default_verdict.
 
-    Shared by save_dsa_solution / save_lld_solution and the import tools, which
-    differ only in their root directory and default verdict.
+    doc_path=None means "this practice produced no per-problem file" (a drill,
+    logged into the shared DRILL_LOG.md) -- any doc_path already recorded is
+    kept, so logging a drill never unlinks a doc save_practice_doc wrote.
+
+    Shared by save_dsa_solution / save_lld_solution, the import tools and
+    log_lld_drill, which differ only in their root directory and default
+    verdict.
     """
     index = _load_index()
     tracker = index["problems"][problem_type]
@@ -312,10 +345,22 @@ def _record_practice(
         "last_practiced": when,
         "last_verdict": verdict,
         "history": existing.get("history", []) + [{"date": when, "verdict": verdict}],
-        "doc_path": str(doc_path.resolve()),
+        "doc_path": str(doc_path.resolve()) if doc_path else existing.get("doc_path"),
     }
     _save_index(index)
     return tracker[slug]
+
+
+def _bump_weak_areas(index: dict, gaps: str) -> List[str]:
+    """Fold a semicolon-separated gaps string into index["weak_areas"], the
+    running count of what keeps going wrong. Returns the parsed gaps. Shared by
+    log_session and log_lld_drill so both feed the same tracker the same way --
+    the caller still owns whatever else it writes (revision.md, sessions)."""
+    gap_list = [g.strip() for g in gaps.split(";") if g.strip()]
+    for g in gap_list:
+        key = g.lower()
+        index["weak_areas"][key] = index["weak_areas"].get(key, 0) + 1
+    return gap_list
 
 
 def _markdown_table(headers: List[str], rows) -> List[str]:
@@ -465,6 +510,10 @@ def _lld_kind(path: Path) -> str:
             # A .md inside a category folder documents that category.
             if path.parent != LLD_SOLUTIONS_DIR:
                 return "category-doc"
+            # The drill log is generated (and appended to) by this server, like
+            # feedback.md -- not a corpus-wide index the user maintains.
+            if name == LLD_DRILL_LOG_MD.name:
+                return "drill-log"
             # At the top level, save_practice_doc's own per-problem write-ups
             # sit alongside corpus-wide indexes (INDEX.md, QUICK_REFERENCE.md).
             # Tell them apart by the header that tool stamps on every file it
@@ -537,6 +586,22 @@ def _lld_category_folder(category: str) -> str:
     return "_".join(w.lower() for w in words) if words else "misc"
 
 
+def _ensure_drill_log() -> None:
+    """Create DRILL_LOG.md with its preamble if it isn't there yet. The LLD
+    root is env-configurable and may not exist at all, so make it too --
+    same contract as _ensure_revision_md."""
+    LLD_SOLUTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    if not LLD_DRILL_LOG_MD.exists():
+        LLD_DRILL_LOG_MD.write_text(
+            "# LLD Drill Log\n\n"
+            "Short, focused LLD drills — appended by the interview-memory MCP "
+            "server (log_lld_drill). Newest entries are at the bottom. Full "
+            "mock interviews live under "
+            f"{LLD_MOCK_DIRNAME}/ instead.\n",
+            encoding="utf-8",
+        )
+
+
 def _rubric_scores() -> dict:
     """The LLD rubric slice of index["competency_scores"], keys un-prefixed."""
     scores = _load_index().get("competency_scores", {})
@@ -583,6 +648,37 @@ def _mock_history_rows(records: List[dict], limit: int = 0) -> List[tuple]:
             weakest,
         ))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Tools: the clock
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_current_time() -> str:
+    """Read the current wall-clock time on this machine. Call this whenever
+    the actual clock matters rather than your own assumption about it:
+
+      - timing a rep: call it when the user starts and again when they
+        finish, and pass the difference as log_lld_drill(duration_minutes=...)
+        or as the time box in a mock evaluation;
+      - answering "how long did that take" / "how much time is left" during a
+        timed mock;
+      - checking today's date before talking about revision scheduling (this
+        is the same date every log writer here stamps).
+
+    Returns the local time, the UTC equivalent and the epoch seconds. The
+    local date is authoritative: log_session, log_lld_drill and
+    save_practice_doc all stamp that date, so quote it (not the UTC one) when
+    referring to "today".
+    """
+    now = _now()
+    return "\n".join([
+        f"Local: {now.isoformat(timespec='seconds')} ({now.strftime('%A, %d %B %Y, %H:%M:%S %Z')})",
+        f"UTC:   {now.astimezone(timezone.utc).isoformat(timespec='seconds')}",
+        f"Epoch: {int(now.timestamp())}",
+        f"Today (as stamped in revision.md / DRILL_LOG.md): {now.date().isoformat()}",
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +807,7 @@ def log_session(
     index = _load_index()
     session_id = len(index["sessions"]) + 1
     today = date.today().isoformat()
-    gap_list = [g.strip() for g in gaps.split(";") if g.strip()]
+    gap_list = _bump_weak_areas(index, gaps)
     strength_list = [s.strip() for s in strengths.split(";") if s.strip()]
 
     index["sessions"].append(
@@ -724,9 +820,6 @@ def log_session(
             "gaps": gap_list,
         }
     )
-    for g in gap_list:
-        key = g.lower()
-        index["weak_areas"][key] = index["weak_areas"].get(key, 0) + 1
 
     scores_tracker = index["competency_scores"]
     for area, score in competency_scores.items():
@@ -2093,6 +2186,115 @@ def get_lld_feedback() -> str:
     )
     lines += ["", f"Full scorecard: {LLD_FEEDBACK_MD}"]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tools: the LLD drill log (short focused reps, not full mock interviews)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def log_lld_drill(
+    topic: str,
+    content_markdown: str,
+    problem_id: str = "",
+    duration_minutes: int = 0,
+    gaps: str = "",
+) -> str:
+    """Append one LLD drill to the running drill log
+    (LLD_SOLUTIONS_DIR/DRILL_LOG.md), creating the file if it doesn't exist
+    yet. This is the persistence step of the LLD-drill skill.
+
+    A drill is a short focused rep — one pattern, one class hierarchy, one
+    "how would you extend this" question — not a full mock interview. Use
+    start_mock_attempt / save_mock_evaluation for those; they get their own
+    folder, rubric scores and per-problem files. A drill only ever appends
+    here, so a session of six quick reps stays one readable file.
+
+    Write the ENTIRE entry body yourself in content_markdown — this tool only
+    persists it and stamps the dated header above it. Start any headings in
+    the body at `###` and don't emit a bare `---` rule: `## ` and `---` are
+    what separate one drill from the next in this file.
+
+    Also updates the shared trackers: `gaps` feed the weak-area counts that
+    get_progress_summary reports, and passing problem_id counts the drill as
+    an attempt on that problem (so suggest_next_problems knows you've touched
+    it). A doc previously linked by save_practice_doc is left alone.
+
+    Args:
+        topic: What was drilled, e.g. "Strategy vs. State for a vending
+            machine" or "Design a Parking Lot".
+        content_markdown: The full write-up of the drill in markdown, authored
+            by you: what was asked, what the user produced, what to fix.
+        problem_id: Optional LLD catalog id (see get_catalog) when the drill
+            was on a cataloged problem, linking it into the problem tracker.
+        duration_minutes: Optional length of the drill, stamped in the header.
+        gaps: Optional semicolon-separated weak areas, same vocabulary as
+            log_session — reuse consistent short names so they aggregate
+            (e.g. "class-decomposition; interface segregation").
+    """
+    if not content_markdown.strip():
+        return "content_markdown is empty — nothing to log."
+
+    today = date.today().isoformat()
+    index = _load_index()
+    gap_list = _bump_weak_areas(index, gaps)
+    _save_index(index)
+
+    problem_note = ""
+    if problem_id.strip():
+        slug = _slugify(problem_id)
+        entry = _record_practice("LLD", slug, None, today, title=topic)
+        problem_note = f" Tracker updated for LLD `{slug}` (attempt #{entry['times_practiced']})."
+
+    header = f"## {today} · {topic.strip()}"
+    if duration_minutes > 0:
+        header += f" · {duration_minutes} min"
+
+    lines = [f"\n{LLD_DRILL_SEPARATOR}\n{header}", ""]
+    if problem_id.strip():
+        lines += [f"_Problem: `{_slugify(problem_id)}`_", ""]
+    lines += [content_markdown.strip()]
+    if gap_list:
+        lines += ["", "**Gaps / to revise:** " + ", ".join(gap_list)]
+
+    _ensure_drill_log()
+    with LLD_DRILL_LOG_MD.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    return (
+        f"Drill logged to {LLD_DRILL_LOG_MD} ({len(gap_list)} gap(s) recorded)."
+        f"{problem_note}"
+    )
+
+
+@mcp.tool()
+def get_lld_drill_log(limit: int = 5) -> str:
+    """Read back the LLD drill log written by log_lld_drill. Call this at the
+    start of a drill session to see what was drilled recently and what was
+    left unresolved, so the next reps build on it instead of repeating it.
+
+    Args:
+        limit: How many of the most recent drills to return (newest last).
+            Pass 0 for the whole file.
+    """
+    if not LLD_DRILL_LOG_MD.exists():
+        return (
+            f"No drill log yet at {LLD_DRILL_LOG_MD}. "
+            "Use log_lld_drill after the first drill."
+        )
+
+    text = LLD_DRILL_LOG_MD.read_text(encoding="utf-8")
+    # Entries are separated by the "---" rule log_lld_drill writes; the first
+    # chunk is the file preamble, so it isn't counted as a drill.
+    _preamble, *entries = text.split(LLD_DRILL_SEPARATOR)
+    if not entries:
+        return f"{LLD_DRILL_LOG_MD} exists but has no drills logged yet."
+    shown = entries[-limit:] if limit > 0 else entries
+
+    heading = f"{len(entries)} drill(s) logged in {LLD_DRILL_LOG_MD}"
+    if len(shown) < len(entries):
+        heading += f" — showing the most recent {len(shown)}"
+    return heading + ".\n\n" + LLD_DRILL_SEPARATOR.join(shown).strip()
 
 
 if __name__ == "__main__":
